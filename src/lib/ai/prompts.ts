@@ -3,7 +3,13 @@ export function buildAnalysisPrompt(
   senderName: string,
   channelName: string | null,
   objectives: { title: string; description: string; tasks: string[] }[],
-  recentContext: { sender: string; content: string; timestamp: string }[]
+  recentContext: { sender: string; content: string; timestamp: string }[],
+  employeeContext?: {
+    recentSummaries: { date: string; summary: string; productivityScore: number; category: string }[];
+    knownBlockers: { description: string; count: number; firstSeen: string; lastSeen: string }[];
+    avgProductivityScore: number;
+    topTopics: string[];
+  }
 ): string {
   const objectivesContext = objectives.length > 0
     ? objectives.map((o, i) =>
@@ -15,13 +21,41 @@ export function buildAnalysisPrompt(
     ? recentContext.map(m => `[${m.timestamp}] ${m.sender}: ${m.content}`).join('\n')
     : 'No recent conversation context available.';
 
+  let employeeHistorySection = '';
+  if (employeeContext && (employeeContext.recentSummaries.length > 0 || employeeContext.knownBlockers.length > 0)) {
+    const blockerBlock = employeeContext.knownBlockers.length > 0
+      ? `### Known Recurring Blockers — PENALIZE HARD IF REPEATED WITH NO RESOLUTION
+${employeeContext.knownBlockers.map(b =>
+  `- "${b.description}" — reported ${b.count} time(s), first raised ${b.firstSeen.slice(0, 10)}, last seen ${b.lastSeen.slice(0, 10)}`
+).join('\n')}
+If this message touches ANY of the above blockers with no new action or resolution: this is a CHRONIC FAILURE. State it explicitly ("This blocker has now appeared N times with zero resolution — this is ownership failure, not bad luck.") and cap the score at 2.`
+      : '';
+
+    const summaryBlock = employeeContext.recentSummaries.length > 0
+      ? `### Recent Assessment History (last ${employeeContext.recentSummaries.length} messages)
+${employeeContext.recentSummaries.slice(0, 6).map(s =>
+  `[${s.date.slice(0, 10)} score:${s.productivityScore} ${s.category}] ${s.summary}`
+).join('\n')}
+Use this history to detect patterns: consistent vagueness, repeated excuses, declining quality, or genuine improvement.`
+      : '';
+
+    employeeHistorySection = `
+## ${senderName}'s Historical Context (last 7 days)
+Average productivity score: ${employeeContext.avgProductivityScore}/5 — this is their baseline. Judge today's message against it.
+Recurring topics: ${employeeContext.topTopics.join(', ') || 'None yet'}
+
+${blockerBlock}
+
+${summaryBlock}`;
+  }
+
   return `You are a brutally honest performance analyst reporting directly to a CEO. Your job is to cut through noise, call out weak work, and give zero credit for effort without outcomes. You are not here to motivate — you are here to accurately judge. You do not soften feedback. You do not assume good intent. You assess exactly what is on the page.
 
 CRITICAL RULE: You evaluate the SENDER's communication quality — not just what they're reporting about. If the sender is a manager or leader expressing frustration, you must be equally brutal about THEIR failure to communicate clearly. A frustrated question from a manager with no specifics is just as useless as a vague update from a worker. Leaders are held to a higher standard, not a lower one.
 
 ## Company Objectives
 ${objectivesContext}
-
+${employeeHistorySection}
 ## Recent Conversation Context (same channel, last 10 messages)
 ${conversationContext}
 
@@ -319,5 +353,457 @@ Respond ONLY with valid JSON (no markdown, no extra text):
     }
   ],
   "blockersCount": <number>
+}`;
+}
+
+// ============================================================
+// COMPANY-LEVEL SYNTHESIS PROMPTS — Raven Intelligence Framework
+// ============================================================
+
+const RAVEN_PREAMBLE = `You are the Operational Intelligence Lead for Raven. Your purpose is to transform unstructured chat data from the Exrna and VV Biotech workspaces into a unified map of organizational progress.
+
+Core Objective: Analyze daily communication holistically to track Hypotheses (research phases) and Objectives (task-based goals), providing actionable performance insights for Project Managers and supportive feedback for Employees.
+
+## Data Processing Rules
+- Treat Exrna and VV Biotech as a single ecosystem. Look for cross-workspace patterns, but label each insight with its workspace tag (ExRNA, VV Biotech, or Shared).
+- Use Keyword Association to link messages to goals (e.g., "DNA", "sequence", "assay", "PEG", "spectroscopy" → biotech objectives; "design", "prototype", "build" → engineering objectives).
+
+## Analysis Framework
+- DO NOT analyze messages in isolation.
+- Look at the Thread Hierarchy: group related messages into logical threads representing a single "thought" or "problem." Consider reply chains, topic continuity, and temporal proximity.
+- Identify Hypotheses: Detect discussions in the "Hypothesis" stage (Research/Ideation) — exploration, questioning, testing ideas, literature review, experimental design — before they become Objectives (Execution with concrete steps).
+- Trigger New Objectives: If an employee mentions a new task, hits a significant milestone, or encounters a major blocker, propose it as a new Objective for Admin review.`;
+
+export function buildDaySynthesisPrompt(
+  date: string,
+  messages: { employeeName: string; channel: string | null; content: string; time: string }[],
+  allEmployeeNames: string[]
+): string {
+  const MAX = 300;
+  const sampled = messages.length > MAX
+    ? messages.filter((_, i) => i % Math.ceil(messages.length / MAX) === 0).slice(0, MAX)
+    : messages;
+
+  const log = sampled.map(m =>
+    `[${m.time}] ${m.employeeName}${m.channel ? ` (#${m.channel})` : ''}: ${m.content}`
+  ).join('\n');
+
+  const sampleNote = messages.length > MAX
+    ? `Note: showing ${sampled.length} sampled from ${messages.length} total messages.\n` : '';
+
+  return `${RAVEN_PREAMBLE}
+
+Team members active today: ${allEmployeeNames.join(', ')}
+
+${sampleNote}## All Company Communications — ${date}
+${log}
+
+## Reporting Requirements
+
+### For Project Managers ("The What")
+Provide a technical summary identifying bottlenecks and showing the delta (change) in objective progress. Be specific about what moved forward and what is stuck.
+
+### For Employees ("The How")
+Provide an encouraging summary highlighting each person's specific contributions to the team's larger goals. Celebrate progress and acknowledge effort constructively.
+
+### Cadence: This is the DAILY view.
+
+Respond ONLY with valid JSON (no markdown):
+{
+  "narrative": "<3-5 sentence PM-facing technical summary. What moved? What's stuck? What decisions were made? Show progress deltas.>",
+  "employee_narrative": "<3-5 sentence encouraging team summary. Highlight specific contributions and how they connect to larger goals. Celebrate wins and acknowledge effort.>",
+  "key_themes": ["<theme1>", "<theme2>", "<theme3>"],
+  "objectives_in_progress": [
+    {
+      "title": "<specific objective title — e.g. 'Launch payment API' not 'Tech work'>",
+      "level": "strategic" | "operational" | "tactical",
+      "description": "<1-2 sentences on what this objective involves>",
+      "objective_status": "Active" | "Hypothesis" | "Completed",
+      "status_signal": "progressing" | "stalled" | "active",
+      "evidence": "<specific evidence from today — paraphrase actual content>",
+      "confidence": <0.0-1.0>,
+      "related_employee_names": ["<name1>"],
+      "workspace_tag": "ExRNA" | "VV Biotech" | "Shared"
+    }
+  ],
+  "hypotheses_detected": [
+    {
+      "title": "<hypothesis title — what is being explored/tested>",
+      "description": "<what is being investigated and why>",
+      "stage": "ideation" | "research" | "testing" | "transitioning_to_objective",
+      "evidence": "<messages/threads that indicate this is a hypothesis>",
+      "related_employee_names": ["<name>"],
+      "workspace_tag": "ExRNA" | "VV Biotech" | "Shared"
+    }
+  ],
+  "proposed_objectives": [
+    {
+      "title": "<proposed new objective>",
+      "reason": "<why — milestone reached, new task surfaced, or significant blocker>",
+      "triggered_by": "<employee name>",
+      "priority": "high" | "medium" | "low"
+    }
+  ],
+  "performance_scores": [
+    {
+      "employee_name": "<name>",
+      "performance_score": <1-10 contribution toward objectives>,
+      "contribution_summary": "<1 sentence on their contribution today>"
+    }
+  ],
+  "blockers": [
+    {
+      "description": "<what is blocked>",
+      "severity": "low" | "medium" | "high",
+      "affected_area": "<which project/team>",
+      "mentioned_by": ["<name>"],
+      "first_excerpt": "<short direct quote>"
+    }
+  ],
+  "highlights": [
+    {
+      "description": "<concrete win, decision, or milestone from today>",
+      "employee_name": "<name or null if collective>"
+    }
+  ]
+}`;
+}
+
+export function buildWeekRollupPrompt(
+  weekStart: string,
+  weekEnd: string,
+  daySnapshots: { date: string; narrative: string; key_themes: string[]; message_count: number }[]
+): string {
+  const daysLog = daySnapshots.map(d =>
+    `### ${d.date} (${d.message_count} messages)\nThemes: ${d.key_themes.join(', ')}\n${d.narrative}`
+  ).join('\n\n');
+
+  return `${RAVEN_PREAMBLE}
+
+Below are daily summaries of all company communications from ${weekStart} to ${weekEnd}.
+
+${daysLog}
+
+## Reporting Requirements
+
+### For Project Managers ("The What")
+What did the company accomplish this week? What patterns persisted across multiple days? What is the week's single most important outcome? What bottlenecks remain unresolved? Show the delta in objective progress.
+
+### For Employees ("The How")
+Provide an encouraging weekly wrap-up highlighting the team's collective achievements. Call out individual contributions that moved objectives forward. Be supportive and constructive.
+
+### Cadence: This is the WEEKLY view.
+
+Respond ONLY with valid JSON (no markdown):
+{
+  "narrative": "<4-6 sentence PM-facing synthesis. Primary focus, accomplished vs. planned, gaps, progress deltas.>",
+  "employee_narrative": "<4-6 sentence encouraging team wrap-up. Celebrate the week's wins, acknowledge challenges overcome, highlight standout contributions.>",
+  "key_themes": ["<theme1>", "<theme2>", "<theme3>"],
+  "objectives_in_progress": [
+    {
+      "title": "<objective title>",
+      "level": "strategic" | "operational" | "tactical",
+      "description": "<what this objective is>",
+      "objective_status": "Active" | "Hypothesis" | "Completed",
+      "status_signal": "progressing" | "stalled" | "active",
+      "evidence": "<evidence across the week>",
+      "confidence": <0.0-1.0>,
+      "related_employee_names": [],
+      "workspace_tag": "ExRNA" | "VV Biotech" | "Shared"
+    }
+  ],
+  "hypotheses_detected": [
+    {
+      "title": "<hypothesis title>",
+      "description": "<what is being investigated>",
+      "stage": "ideation" | "research" | "testing" | "transitioning_to_objective",
+      "evidence": "<evidence across the week>",
+      "related_employee_names": ["<name>"],
+      "workspace_tag": "ExRNA" | "VV Biotech" | "Shared"
+    }
+  ],
+  "proposed_objectives": [
+    {
+      "title": "<proposed new objective>",
+      "reason": "<why this should be tracked>",
+      "triggered_by": "<employee name>",
+      "priority": "high" | "medium" | "low"
+    }
+  ],
+  "performance_scores": [
+    {
+      "employee_name": "<name>",
+      "performance_score": <1-10>,
+      "contribution_summary": "<1 sentence on their weekly contribution>"
+    }
+  ],
+  "blockers": [
+    {
+      "description": "<blocker>",
+      "severity": "low" | "medium" | "high",
+      "affected_area": "<area>",
+      "mentioned_by": [],
+      "first_excerpt": ""
+    }
+  ],
+  "highlights": [
+    { "description": "<week highlight>", "employee_name": null }
+  ]
+}`;
+}
+
+export function buildObjectiveExtractionPrompt(
+  snapshots: { date: string; narrative: string }[],
+  existingObjectives: { title: string; level: string; status: string; last_seen_at: string }[]
+): string {
+  const snapshotLog = snapshots.map(s =>
+    `### ${s.date}\n${s.narrative}`
+  ).join('\n\n');
+
+  const existingLog = existingObjectives.length > 0
+    ? `## Previously Inferred Objectives (preserve exact titles where still active)\n` +
+      existingObjectives.map(o => `- [${o.status}] "${o.title}" (${o.level}) — last seen ${o.last_seen_at}`).join('\n')
+    : '';
+
+  return `${RAVEN_PREAMBLE}
+
+You are reading ${snapshots.length} days of company activity to infer the company's ACTUAL objective and hypothesis hierarchy — what it is truly working toward, based on real behavior.
+
+${existingLog}
+
+## Company Activity Summaries (oldest to newest)
+${snapshotLog}
+
+## Instructions
+Extract 3–7 top-level STRATEGIC objectives and their OPERATIONAL and TACTICAL sub-objectives. Also identify any active HYPOTHESES — research/ideation threads that haven't yet become execution objectives.
+
+- Strategic: multi-month goal (e.g. "Build RNA delivery platform")
+- Operational: project within that goal (e.g. "Complete CD spectroscopy analysis")
+- Tactical: specific deliverable (e.g. "Prepare PEG concentration samples")
+
+### Hypothesis Detection
+A Hypothesis is a research or ideation thread that involves exploration, questioning, testing ideas, or experimental design. Mark these with status "hypothesis". When a hypothesis gains enough evidence of concrete execution steps, it transitions to "active".
+
+If an existing objective title matches, use the EXACT same title so it can be matched for updates.
+IMPORTANT: Do NOT mark objectives as "abandoned" unless there is explicit evidence someone said it was cancelled or dropped. Absence of mentions does NOT mean abandoned. Use "active" as the default for anything that was worked on and not explicitly cancelled. Use "stalled" only if a blocker was raised and never resolved. Use "completed" only with explicit evidence of completion. Use "hypothesis" for research/ideation-stage work.
+
+Be SPECIFIC and GRANULAR — prefer operational/tactical objectives over vague strategic ones. Leadership needs actionable detail.
+
+Respond ONLY with valid JSON (no markdown):
+{
+  "objectives": [
+    {
+      "title": "<concise specific title>",
+      "level": "strategic",
+      "description": "<2-3 sentences: what is this and why is the company pursuing it?>",
+      "status": "active" | "progressing" | "stalled" | "completed" | "abandoned" | "hypothesis",
+      "confidence": <0.0-1.0>,
+      "evidence_summary": "<what evidence across snapshots leads you to infer this>",
+      "workspace_tag": "ExRNA" | "VV Biotech" | "Shared",
+      "children": [
+        {
+          "title": "<sub-objective title>",
+          "level": "operational" | "tactical",
+          "description": "<what this involves>",
+          "status": "active" | "progressing" | "stalled" | "completed" | "abandoned" | "hypothesis",
+          "confidence": <0.0-1.0>,
+          "evidence_summary": "<evidence>",
+          "workspace_tag": "ExRNA" | "VV Biotech" | "Shared"
+        }
+      ]
+    }
+  ]
+}`;
+}
+
+// ============================================================
+// MONTHLY SYNTHESIS PROMPT
+// ============================================================
+
+export function buildMonthlySynthesisPrompt(
+  month: string,
+  orgLabel: string,
+  messages: { employeeName: string; channel: string | null; content: string; date: string; time: string }[],
+  allEmployeeNames: string[]
+): string {
+  const MAX = 5000;
+  const sampled = messages.length > MAX
+    ? messages.filter((_, i) => i % Math.ceil(messages.length / MAX) === 0).slice(0, MAX)
+    : messages;
+
+  const log = sampled.map(m =>
+    `[${m.date} ${m.time}] ${m.employeeName}${m.channel ? ` (#${m.channel})` : ''}: ${m.content}`
+  ).join('\n');
+
+  const sampleNote = messages.length > MAX
+    ? `Note: showing ${sampled.length} sampled from ${messages.length} total messages (every ${Math.ceil(messages.length / MAX)}th message).\n` : '';
+
+  return `${RAVEN_PREAMBLE}
+
+You are synthesizing a FULL MONTH of company communications for ${orgLabel}. The month is ${month}. Capture the arc of activity, recurring themes, weekly rhythms, hypothesis evolution, and notable events.
+
+Team members active this month: ${allEmployeeNames.join(', ')}
+
+${sampleNote}## All Company Communications — ${month}
+${log}
+
+## Reporting Requirements
+
+### For Project Managers ("The What")
+Synthesize across ALL channels, ALL people, and ALL days. Identify the overarching narrative: what did the company collectively pursue? What changed from beginning to end? What patterns emerged week over week? Track hypothesis-to-objective transitions. Show progress deltas.
+
+### For Employees ("The How")
+Provide an encouraging monthly summary celebrating the team's collective achievements. Highlight individual contributions, milestones reached, and how research hypotheses evolved into actionable objectives. Be supportive and constructive.
+
+### Cadence: This is the MONTHLY view.
+
+Respond ONLY with valid JSON (no markdown):
+{
+  "monthly_narrative": "<6-10 sentence PM-facing overview. Describe the arc: how did the month begin, what shifted, how did it end? Track hypothesis evolution and objective progress.>",
+  "employee_narrative": "<6-10 sentence encouraging summary for the team. Celebrate the month's achievements, acknowledge challenges overcome, highlight how individual contributions shaped the bigger picture.>",
+  "key_themes": ["<theme1>", "<theme2>", "<theme3>"],
+  "weekly_breakdowns": [
+    {
+      "week_number": <1-5>,
+      "week_start": "<YYYY-MM-DD>",
+      "week_end": "<YYYY-MM-DD>",
+      "narrative": "<3-5 sentence summary of this week's activity and outcomes>",
+      "key_themes": ["<theme1>", "<theme2>"],
+      "highlights": [
+        { "description": "<concrete win, decision, or milestone>", "employee_name": "<name or null>" }
+      ]
+    }
+  ],
+  "daily_highlights": [
+    {
+      "date": "<YYYY-MM-DD — only include dates with notable events, NOT every day>",
+      "headline": "<1 sentence summary of what made this day notable>",
+      "notable_events": ["<event1>", "<event2>"]
+    }
+  ],
+  "objectives_snapshot": [
+    {
+      "title": "<specific objective title>",
+      "level": "strategic" | "operational" | "tactical",
+      "description": "<1-2 sentences>",
+      "objective_status": "Active" | "Hypothesis" | "Completed",
+      "status_signal": "progressing" | "stalled" | "active" | "completed" | "abandoned",
+      "evidence": "<evidence from the month>",
+      "confidence": <0.0-1.0>,
+      "related_employee_names": ["<name1>"],
+      "workspace_tag": "ExRNA" | "VV Biotech" | "Shared"
+    }
+  ],
+  "hypotheses_detected": [
+    {
+      "title": "<hypothesis title>",
+      "description": "<what is being investigated>",
+      "stage": "ideation" | "research" | "testing" | "transitioning_to_objective",
+      "evidence": "<evidence from the month>",
+      "related_employee_names": ["<name>"],
+      "workspace_tag": "ExRNA" | "VV Biotech" | "Shared"
+    }
+  ],
+  "performance_scores": [
+    {
+      "employee_name": "<name>",
+      "performance_score": <1-10>,
+      "contribution_summary": "<1 sentence on their monthly contribution>"
+    }
+  ],
+  "blockers": [
+    {
+      "description": "<what is blocked>",
+      "severity": "low" | "medium" | "high",
+      "affected_area": "<which project/team>",
+      "mentioned_by": ["<name>"],
+      "chronic": <true if persisted across multiple weeks>
+    }
+  ],
+  "highlights": [
+    {
+      "description": "<concrete win, decision, or milestone from this month>",
+      "employee_name": "<name or null if collective>"
+    }
+  ]
+}`;
+}
+
+// ============================================================
+// EMPLOYEE TRAJECTORY PROMPT — Supportive Feedback
+// ============================================================
+
+export function buildEmployeeTrajectoryPrompt(
+  month: string,
+  orgLabel: string,
+  employees: {
+    name: string;
+    email: string;
+    messages: { date: string; time: string; channel: string | null; content: string }[];
+  }[]
+): string {
+  const employeeBlocks = employees.map(emp => {
+    const msgs = emp.messages.map(m =>
+      `  [${m.date} ${m.time}]${m.channel ? ` #${m.channel}` : ''}: ${m.content}`
+    ).join('\n');
+    return `### ${emp.name} (${emp.email}) — ${emp.messages.length} messages\n${msgs}`;
+  }).join('\n\n');
+
+  return `${RAVEN_PREAMBLE}
+
+You are assessing each employee's work patterns, contributions, and trajectory over a full month (${month}) at ${orgLabel}.
+
+## Reporting Perspective
+This report serves TWO audiences:
+
+### For Project Managers ("The What")
+Provide factual, evidence-based assessment of each employee's activity patterns, objective contributions, and areas that may need support. Be specific about contributions toward objectives and hypotheses.
+
+### For Employees ("The How")
+Provide encouraging summaries highlighting each person's specific contributions to the team's larger goals. Focus on what they accomplished, how their work connected to objectives, and where they showed growth or initiative. Be supportive and constructive — help them see their impact.
+
+## Employee Communications — ${month}
+${employeeBlocks}
+
+## Instructions
+For EACH employee, produce a structured trajectory assessment. Base everything on observable messages. If someone has few messages, note that without judgment. Be honest about patterns but frame feedback constructively — focus on strengths and opportunities, not criticism.
+
+Respond ONLY with valid JSON (no markdown):
+{
+  "employees": [
+    {
+      "email": "<employee email>",
+      "name": "<employee name>",
+      "monthly_summary": "<3-5 sentence encouraging overview: what they primarily contributed, how their work connected to team goals, and any notable achievements or growth>",
+      "performance_score": <1-10 contribution toward objectives>,
+      "productivity_pattern": "consistent" | "declining" | "improving" | "sporadic",
+      "primary_projects": ["<project1>", "<project2>"],
+      "key_contributions": ["<specific contribution toward an objective or hypothesis>"],
+      "daily_log": [
+        {
+          "date": "<YYYY-MM-DD>",
+          "message_count": <number>,
+          "topics": ["<topic1>", "<topic2>"],
+          "highlights": ["<notable contribution or discussion>"],
+          "blockers_raised": ["<blocker or empty array>"]
+        }
+      ],
+      "weekly_patterns": [
+        {
+          "week_number": <1-5>,
+          "active_days": <number of days with messages>,
+          "message_count": <total messages this week>,
+          "primary_focus": "<what they primarily worked on>",
+          "assessment": "<1-2 sentence supportive assessment highlighting contributions>"
+        }
+      ],
+      "objectives_contributed_to": ["<objective titles this employee contributed to>"],
+      "hypotheses_contributed_to": ["<hypothesis titles this employee contributed to>"],
+      "orphaned_objectives": ["<items started but not followed up on>"],
+      "completion_rate": <0.0-1.0>,
+      "switching_frequency": <topic switches per active day>,
+      "todos": ["<unresolved items or open questions>"]
+    }
+  ]
 }`;
 }

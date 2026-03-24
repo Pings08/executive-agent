@@ -102,18 +102,24 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       return;
     }
     try {
-      const [emps, objs, alts, alertCount, analyses] = await Promise.all([
+      // Fetch essential data first (2 queries instead of 5)
+      const [emps, objs] = await Promise.all([
         dalFetchEmployees(supabase),
         dalFetchObjectives(supabase),
-        dalFetchAlerts(supabase, { unresolvedOnly: true, limit: 20 }),
-        dalFetchUnreadAlertCount(supabase),
-        dalFetchAnalyses(supabase, { limit: 20 }),
       ]);
       setEmployees(dedupe(emps));
       setObjectives(dedupe(objs));
-      setAlerts(dedupe(alts));
-      setUnreadAlertCount(alertCount);
-      setRecentAnalyses(dedupe(analyses));
+
+      // Fetch non-critical data lazily (don't block page load)
+      Promise.all([
+        dalFetchAlerts(supabase, { unresolvedOnly: true, limit: 10 }),
+        dalFetchUnreadAlertCount(supabase),
+        dalFetchAnalyses(supabase, { limit: 10 }),
+      ]).then(([alts, alertCount, analyses]) => {
+        setAlerts(dedupe(alts));
+        setUnreadAlertCount(alertCount);
+        setRecentAnalyses(dedupe(analyses));
+      }).catch(() => { /* non-critical */ });
     } catch (err) {
       const msg = err instanceof Error ? err.message : JSON.stringify(err);
       console.error('Failed to fetch data from Supabase:', msg, err);
@@ -183,33 +189,39 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!isSupabaseConfigured) return;
 
+    const fetchWithTimeout = (url: string, opts: RequestInit = {}, ms = 10000) => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), ms);
+      return fetch(url, { ...opts, signal: controller.signal }).finally(() => clearTimeout(timeout));
+    };
+
     const syncAndIngest = async () => {
       try {
-        // Sync employees/projects/tasks from ERPNext first
-        await fetch('/api/pipeline/sync', { method: 'POST' });
-        // Then ingest + process new Raven messages
-        await fetch('/api/pipeline/ingest', { method: 'POST' });
+        // Sync employees/projects/tasks from ERPNext first (10s timeout)
+        await fetchWithTimeout('/api/pipeline/sync', { method: 'POST' }, 10000);
+        // Then ingest new Raven messages (10s timeout)
+        await fetchWithTimeout('/api/pipeline/ingest', { method: 'POST' }, 10000);
         // Refresh UI state after pipeline runs
         await refreshData();
       } catch {
-        // Silent fail
+        // Silent fail — sync may time out but page should still load
       }
     };
 
     const pollIngest = async () => {
       try {
-        await fetch('/api/pipeline/ingest', { method: 'POST' });
+        await fetchWithTimeout('/api/pipeline/ingest', { method: 'POST' }, 10000);
         await refreshData();
       } catch {
         // Silent fail
       }
     };
 
-    // On mount: full sync + ingest
-    syncAndIngest();
-    // Every 2 min: ingest only (ERP structure doesn't change that fast)
-    const interval = setInterval(pollIngest, 120_000);
-    return () => clearInterval(interval);
+    // On mount: defer sync so it doesn't block initial page load
+    const syncTimeout = setTimeout(syncAndIngest, 5000);
+    // Every 10 min: ingest only (reduced to ease Supabase load)
+    const interval = setInterval(pollIngest, 600_000);
+    return () => { clearTimeout(syncTimeout); clearInterval(interval); };
   }, [refreshData]);
 
   // Objective mutations

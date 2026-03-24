@@ -1,9 +1,15 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { buildAnalysisPrompt, buildDailySummaryPrompt, buildEODDigestPrompt, buildDailyNotePrompt } from './prompts';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+import { buildAnalysisPrompt, buildDailySummaryPrompt, buildEODDigestPrompt, buildDailyNotePrompt, buildDaySynthesisPrompt, buildWeekRollupPrompt, buildObjectiveExtractionPrompt, buildMonthlySynthesisPrompt, buildEmployeeTrajectoryPrompt } from './prompts';
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY!,
-});
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
+
+export interface EmployeeContext {
+  recentSummaries: { date: string; summary: string; productivityScore: number; category: string }[];
+  knownBlockers: { description: string; count: number; firstSeen: string; lastSeen: string }[];
+  avgProductivityScore: number;
+  topTopics: string[];
+}
 
 export interface AnalysisResult {
   category: string;
@@ -70,9 +76,9 @@ function parseJSON<T>(text: string): T {
 }
 
 async function callWithRetry(
-  fn: () => Promise<Anthropic.Message>,
+  fn: () => Promise<string>,
   retries = 3
-): Promise<Anthropic.Message> {
+): Promise<string> {
   for (let i = 0; i < retries; i++) {
     try {
       return await fn();
@@ -81,12 +87,10 @@ async function callWithRetry(
         ? (err as { status: number }).status : 0;
       const msg = err instanceof Error ? err.message : '';
 
-      const is429 = status === 429 || msg.includes('429') || msg.includes('rate_limit');
-      const is5xx = status === 500 || status === 529 ||
-        msg.includes('500') || msg.includes('529') || msg.includes('overloaded');
+      const is429 = status === 429 || msg.includes('429') || msg.includes('rate_limit') || msg.includes('quota');
+      const is5xx = status >= 500 || msg.includes('500') || msg.includes('503') || msg.includes('overloaded');
 
       if ((is429 || is5xx) && i < retries - 1) {
-        // Rate limit: wait 15s per attempt; server errors: exponential from 1.5s
         const waitMs = is429 ? 15_000 * (i + 1) : 1500 * Math.pow(2, i);
         await new Promise(r => setTimeout(r, waitMs));
         continue;
@@ -102,20 +106,18 @@ export async function analyzeMessage(
   senderName: string,
   channelName: string | null,
   objectives: { title: string; description: string; tasks: string[] }[],
-  recentContext: { sender: string; content: string; timestamp: string }[]
+  recentContext: { sender: string; content: string; timestamp: string }[],
+  employeeContext?: EmployeeContext
 ): Promise<AnalysisResult> {
-  const prompt = buildAnalysisPrompt(messageContent, senderName, channelName, objectives, recentContext);
+  const prompt = buildAnalysisPrompt(messageContent, senderName, channelName, objectives, recentContext, employeeContext);
 
-  const response = await callWithRetry(() => anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 1024,
-    messages: [{ role: 'user', content: prompt }],
-  }));
+  const text = await callWithRetry(async () => {
+    const result = await model.generateContent(prompt);
+    return result.response.text();
+  });
 
-  const text = response.content[0].type === 'text' ? response.content[0].text : '';
   const result = parseJSON<AnalysisResult>(text);
 
-  // Validate and provide defaults
   return {
     category: result.category || 'general',
     sentiment: result.sentiment || 'neutral',
@@ -136,13 +138,11 @@ export async function generateDailySummary(
 ): Promise<DigestResult> {
   const prompt = buildDailySummaryPrompt(employeeName, messages, analyses);
 
-  const response = await callWithRetry(() => anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 1024,
-    messages: [{ role: 'user', content: prompt }],
-  }));
+  const text = await callWithRetry(async () => {
+    const result = await model.generateContent(prompt);
+    return result.response.text();
+  });
 
-  const text = response.content[0].type === 'text' ? response.content[0].text : '';
   const result = parseJSON<DigestResult>(text);
 
   return {
@@ -176,13 +176,11 @@ export async function generateEmployeeDailyNote(
 ): Promise<DailyNoteResult> {
   const prompt = buildDailyNotePrompt(employeeName, messages, analyses, objectives);
 
-  const response = await callWithRetry(() => anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 2048,
-    messages: [{ role: 'user', content: prompt }],
-  }));
+  const text = await callWithRetry(async () => {
+    const result = await model.generateContent(prompt);
+    return result.response.text();
+  });
 
-  const text = response.content[0].type === 'text' ? response.content[0].text : '';
   const result = parseJSON<DailyNoteResult>(text);
 
   return {
@@ -222,13 +220,11 @@ export async function generateEODDigest(
 ): Promise<EODDigestResult> {
   const prompt = buildEODDigestPrompt(employeeName, messages, analyses, objectives);
 
-  const response = await callWithRetry(() => anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 2048,
-    messages: [{ role: 'user', content: prompt }],
-  }));
+  const text = await callWithRetry(async () => {
+    const result = await model.generateContent(prompt);
+    return result.response.text();
+  });
 
-  const text = response.content[0].type === 'text' ? response.content[0].text : '';
   const result = parseJSON<EODDigestResult>(text);
 
   return {
@@ -250,4 +246,343 @@ export async function generateEODDigest(
     })) : [],
     blockersCount: Math.max(0, result.blockersCount || 0),
   };
+}
+
+// ============================================================
+// COMPANY-LEVEL SYNTHESIS
+// ============================================================
+
+export interface HypothesisDetected {
+  title: string;
+  description: string;
+  stage: 'ideation' | 'research' | 'testing' | 'transitioning_to_objective';
+  evidence: string;
+  related_employee_names: string[];
+  workspace_tag?: string;
+}
+
+export interface ProposedObjective {
+  title: string;
+  reason: string;
+  triggered_by: string;
+  priority: 'high' | 'medium' | 'low';
+}
+
+export interface PerformanceScore {
+  employee_name: string;
+  performance_score: number;
+  contribution_summary: string;
+}
+
+export interface CompanySynthesisResult {
+  narrative: string;
+  employee_narrative?: string;
+  key_themes: string[];
+  objectives_snapshot: {
+    title: string;
+    level: string;
+    description: string;
+    objective_status?: string;
+    status_signal: string;
+    evidence: string;
+    confidence: number;
+    related_employee_names: string[];
+    workspace_tag?: string;
+  }[];
+  hypotheses_detected?: HypothesisDetected[];
+  proposed_objectives?: ProposedObjective[];
+  performance_scores?: PerformanceScore[];
+  blockers: {
+    description: string;
+    severity: string;
+    affected_area: string;
+    mentioned_by: string[];
+    first_excerpt?: string;
+    chronic?: boolean;
+  }[];
+  highlights: { description: string; employee_name: string | null }[];
+}
+
+export interface ObjectiveHierarchyResult {
+  objectives: {
+    title: string;
+    level: string;
+    description: string;
+    status: string;
+    confidence: number;
+    evidence_summary: string;
+    children: {
+      title: string;
+      level: string;
+      description: string;
+      status: string;
+      confidence: number;
+      evidence_summary: string;
+    }[];
+  }[];
+}
+
+export async function synthesizeCompanyDay(
+  date: string,
+  messages: { employeeName: string; channel: string | null; content: string; time: string }[],
+  allEmployeeNames: string[]
+): Promise<CompanySynthesisResult> {
+  const prompt = buildDaySynthesisPrompt(date, messages, allEmployeeNames);
+  const text = await callWithRetry(async () => {
+    const result = await model.generateContent(prompt);
+    return result.response.text();
+  });
+  const r = parseJSON<CompanySynthesisResult & { objectives_in_progress?: CompanySynthesisResult['objectives_snapshot'] }>(text);
+  return {
+    narrative: r.narrative || '',
+    employee_narrative: r.employee_narrative || '',
+    key_themes: Array.isArray(r.key_themes) ? r.key_themes : [],
+    objectives_snapshot: Array.isArray(r.objectives_in_progress) ? r.objectives_in_progress
+      : Array.isArray(r.objectives_snapshot) ? r.objectives_snapshot : [],
+    hypotheses_detected: Array.isArray(r.hypotheses_detected) ? r.hypotheses_detected : [],
+    proposed_objectives: Array.isArray(r.proposed_objectives) ? r.proposed_objectives : [],
+    performance_scores: Array.isArray(r.performance_scores) ? r.performance_scores : [],
+    blockers: Array.isArray(r.blockers) ? r.blockers : [],
+    highlights: Array.isArray(r.highlights) ? r.highlights : [],
+  };
+}
+
+export async function synthesizeCompanyWeek(
+  weekStart: string,
+  weekEnd: string,
+  daySnapshots: { date: string; narrative: string; key_themes: string[]; message_count: number }[]
+): Promise<CompanySynthesisResult> {
+  const prompt = buildWeekRollupPrompt(weekStart, weekEnd, daySnapshots);
+  const text = await callWithRetry(async () => {
+    const result = await model.generateContent(prompt);
+    return result.response.text();
+  });
+  const r = parseJSON<CompanySynthesisResult & { objectives_in_progress?: CompanySynthesisResult['objectives_snapshot'] }>(text);
+  return {
+    narrative: r.narrative || '',
+    employee_narrative: r.employee_narrative || '',
+    key_themes: Array.isArray(r.key_themes) ? r.key_themes : [],
+    objectives_snapshot: Array.isArray(r.objectives_in_progress) ? r.objectives_in_progress
+      : Array.isArray(r.objectives_snapshot) ? r.objectives_snapshot : [],
+    hypotheses_detected: Array.isArray(r.hypotheses_detected) ? r.hypotheses_detected : [],
+    proposed_objectives: Array.isArray(r.proposed_objectives) ? r.proposed_objectives : [],
+    performance_scores: Array.isArray(r.performance_scores) ? r.performance_scores : [],
+    blockers: Array.isArray(r.blockers) ? r.blockers : [],
+    highlights: Array.isArray(r.highlights) ? r.highlights : [],
+  };
+}
+
+export async function extractObjectiveHierarchy(
+  snapshots: { date: string; narrative: string }[],
+  existingObjectives: { title: string; level: string; status: string; last_seen_at: string }[]
+): Promise<ObjectiveHierarchyResult> {
+  const prompt = buildObjectiveExtractionPrompt(snapshots, existingObjectives);
+  const text = await callWithRetry(async () => {
+    const result = await model.generateContent(prompt);
+    return result.response.text();
+  });
+  const r = parseJSON<ObjectiveHierarchyResult>(text);
+  return { objectives: Array.isArray(r.objectives) ? r.objectives : [] };
+}
+
+// ============================================================
+// MONTHLY SYNTHESIS
+// ============================================================
+
+export interface MonthlySynthesisResult {
+  monthly_narrative: string;
+  employee_narrative?: string;
+  key_themes: string[];
+  weekly_breakdowns: {
+    week_number: number;
+    week_start: string;
+    week_end: string;
+    narrative: string;
+    key_themes: string[];
+    highlights: { description: string; employee_name: string | null }[];
+  }[];
+  daily_highlights: {
+    date: string;
+    headline: string;
+    notable_events: string[];
+  }[];
+  objectives_snapshot: {
+    title: string;
+    level: string;
+    description: string;
+    objective_status?: string;
+    status_signal: string;
+    evidence: string;
+    confidence: number;
+    related_employee_names: string[];
+    workspace_tag?: string;
+  }[];
+  hypotheses_detected?: HypothesisDetected[];
+  performance_scores?: PerformanceScore[];
+  blockers: {
+    description: string;
+    severity: string;
+    affected_area: string;
+    mentioned_by: string[];
+    chronic: boolean;
+  }[];
+  highlights: { description: string; employee_name: string | null }[];
+}
+
+export interface EmployeeTrajectory {
+  email: string;
+  name: string;
+  monthly_summary: string;
+  performance_score?: number;
+  productivity_pattern: string;
+  primary_projects: string[];
+  key_contributions?: string[];
+  daily_log: {
+    date: string;
+    message_count: number;
+    topics: string[];
+    highlights: string[];
+    blockers_raised: string[];
+  }[];
+  weekly_patterns: {
+    week_number: number;
+    active_days: number;
+    message_count: number;
+    primary_focus: string;
+    assessment: string;
+  }[];
+  objectives_contributed_to?: string[];
+  hypotheses_contributed_to?: string[];
+  orphaned_objectives: string[];
+  completion_rate: number;
+  switching_frequency: number;
+  todos: string[];
+}
+
+export async function synthesizeCompanyMonth(
+  month: string,
+  orgLabel: string,
+  messages: { employeeName: string; channel: string | null; content: string; date: string; time: string }[],
+  allEmployeeNames: string[]
+): Promise<MonthlySynthesisResult> {
+  const prompt = buildMonthlySynthesisPrompt(month, orgLabel, messages, allEmployeeNames);
+  const text = await callWithRetry(async () => {
+    const result = await model.generateContent(prompt);
+    return result.response.text();
+  });
+  const r = parseJSON<MonthlySynthesisResult>(text);
+  return {
+    monthly_narrative: r.monthly_narrative || '',
+    employee_narrative: r.employee_narrative || '',
+    key_themes: Array.isArray(r.key_themes) ? r.key_themes : [],
+    weekly_breakdowns: Array.isArray(r.weekly_breakdowns)
+      ? r.weekly_breakdowns.map(w => ({
+          week_number: w.week_number || 1,
+          week_start: w.week_start || '',
+          week_end: w.week_end || '',
+          narrative: w.narrative || '',
+          key_themes: Array.isArray(w.key_themes) ? w.key_themes : [],
+          highlights: Array.isArray(w.highlights)
+            ? w.highlights.map(h => ({
+                description: h.description || '',
+                employee_name: h.employee_name || null,
+              }))
+            : [],
+        }))
+      : [],
+    daily_highlights: Array.isArray(r.daily_highlights)
+      ? r.daily_highlights.map(d => ({
+          date: d.date || '',
+          headline: d.headline || '',
+          notable_events: Array.isArray(d.notable_events) ? d.notable_events : [],
+        }))
+      : [],
+    objectives_snapshot: Array.isArray(r.objectives_snapshot)
+      ? r.objectives_snapshot.map(o => ({
+          title: o.title || '',
+          level: o.level || 'operational',
+          description: o.description || '',
+          objective_status: o.objective_status || undefined,
+          status_signal: o.status_signal || 'active',
+          evidence: o.evidence || '',
+          confidence: Math.min(1, Math.max(0, o.confidence ?? 0.5)),
+          related_employee_names: Array.isArray(o.related_employee_names) ? o.related_employee_names : [],
+          workspace_tag: o.workspace_tag || undefined,
+        }))
+      : [],
+    hypotheses_detected: Array.isArray(r.hypotheses_detected) ? r.hypotheses_detected : [],
+    performance_scores: Array.isArray(r.performance_scores) ? r.performance_scores : [],
+    blockers: Array.isArray(r.blockers)
+      ? r.blockers.map(b => ({
+          description: b.description || '',
+          severity: b.severity || 'medium',
+          affected_area: b.affected_area || '',
+          mentioned_by: Array.isArray(b.mentioned_by) ? b.mentioned_by : [],
+          chronic: Boolean(b.chronic),
+        }))
+      : [],
+    highlights: Array.isArray(r.highlights)
+      ? r.highlights.map(h => ({
+          description: h.description || '',
+          employee_name: h.employee_name || null,
+        }))
+      : [],
+  };
+}
+
+// ============================================================
+// EMPLOYEE TRAJECTORIES
+// ============================================================
+
+export async function computeMonthlyTrajectories(
+  month: string,
+  orgLabel: string,
+  employees: {
+    name: string;
+    email: string;
+    messages: { date: string; time: string; channel: string | null; content: string }[];
+  }[]
+): Promise<EmployeeTrajectory[]> {
+  const prompt = buildEmployeeTrajectoryPrompt(month, orgLabel, employees);
+  const text = await callWithRetry(async () => {
+    const result = await model.generateContent(prompt);
+    return result.response.text();
+  });
+  const r = parseJSON<{ employees: EmployeeTrajectory[] }>(text);
+  const trajectories = Array.isArray(r.employees) ? r.employees : [];
+  return trajectories.map(t => ({
+    email: t.email || '',
+    name: t.name || '',
+    monthly_summary: t.monthly_summary || '',
+    performance_score: typeof t.performance_score === 'number' ? Math.min(10, Math.max(1, t.performance_score)) : undefined,
+    productivity_pattern: ['consistent', 'declining', 'improving', 'sporadic'].includes(t.productivity_pattern)
+      ? t.productivity_pattern
+      : 'sporadic',
+    primary_projects: Array.isArray(t.primary_projects) ? t.primary_projects : [],
+    key_contributions: Array.isArray(t.key_contributions) ? t.key_contributions : [],
+    daily_log: Array.isArray(t.daily_log)
+      ? t.daily_log.map(d => ({
+          date: d.date || '',
+          message_count: Math.max(0, d.message_count || 0),
+          topics: Array.isArray(d.topics) ? d.topics : [],
+          highlights: Array.isArray(d.highlights) ? d.highlights : [],
+          blockers_raised: Array.isArray(d.blockers_raised) ? d.blockers_raised : [],
+        }))
+      : [],
+    weekly_patterns: Array.isArray(t.weekly_patterns)
+      ? t.weekly_patterns.map(w => ({
+          week_number: w.week_number || 1,
+          active_days: Math.max(0, w.active_days || 0),
+          message_count: Math.max(0, w.message_count || 0),
+          primary_focus: w.primary_focus || '',
+          assessment: w.assessment || '',
+        }))
+      : [],
+    objectives_contributed_to: Array.isArray(t.objectives_contributed_to) ? t.objectives_contributed_to : [],
+    hypotheses_contributed_to: Array.isArray(t.hypotheses_contributed_to) ? t.hypotheses_contributed_to : [],
+    orphaned_objectives: Array.isArray(t.orphaned_objectives) ? t.orphaned_objectives : [],
+    completion_rate: Math.min(1, Math.max(0, t.completion_rate ?? 0)),
+    switching_frequency: Math.max(0, t.switching_frequency ?? 0),
+    todos: Array.isArray(t.todos) ? t.todos : [],
+  }));
 }
