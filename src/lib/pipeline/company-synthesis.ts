@@ -1,4 +1,4 @@
-import { createAdminClient } from '@/lib/supabase/admin';
+import { getDb, now, toJson, parseJson, placeholders } from '@/lib/d1/client';
 import {
   synthesizeCompanyDay, synthesizeCompanyWeek, extractObjectiveHierarchy,
   synthesizeCompanyMonth, computeMonthlyTrajectories,
@@ -64,26 +64,28 @@ export interface InferredObjective {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-async function getState(supabase: ReturnType<typeof createAdminClient>, key: string) {
-  const { data } = await supabase
-    .from('pipeline_state')
-    .select('value')
-    .eq('key', key)
-    .maybeSingle();
-  return data?.value ?? null;
+async function getState(db: D1Database, key: string) {
+  const row = await db
+    .prepare('SELECT value FROM pipeline_state WHERE key = ?')
+    .bind(key)
+    .first<{ value: string }>();
+  return row ? parseJson<Record<string, unknown>>(row.value) : null;
 }
 
-async function setState(supabase: ReturnType<typeof createAdminClient>, key: string, value: unknown) {
-  await supabase
-    .from('pipeline_state')
-    .upsert({ key, value }, { onConflict: 'key' });
+async function setState(db: D1Database, key: string, value: unknown) {
+  await db
+    .prepare(
+      `INSERT INTO pipeline_state (key, value, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+    )
+    .bind(key, toJson(value), now())
+    .run();
 }
 
-/** Build an OR filter for channel_id prefixes matching an org */
-function buildChannelFilter(supabase: ReturnType<typeof createAdminClient>, org: Org) {
-  const prefixes = ORG_CHANNEL_PREFIXES[org];
-  // PostgREST or filter: channel_id.like.PREFIX1%,channel_id.like.PREFIX2%
-  return prefixes.map(p => `channel_id.like.${p}%`).join(',');
+/** Build SQL WHERE clause fragments for channel_id prefixes matching an org */
+function buildChannelLikeClauses(org: Org): string[] {
+  return ORG_CHANNEL_PREFIXES[org].map(p => `channel_id LIKE '${p}%'`);
 }
 
 const ORG_LABELS: Record<Org, string> = {
@@ -101,13 +103,13 @@ export async function synthesizeDay(date: string, org: Org): Promise<{
   skipped: boolean;
   error: string | null;
 }> {
-  const supabase = createAdminClient();
+  const db = getDb();
   const stateKey = `snapshot:day:${org}:${date}`;
 
   // Check if already synthesized
-  const existing = await getState(supabase, stateKey);
+  const existing = await getState(db, stateKey);
   if (existing?.narrative) {
-    return { snapshotId: stateKey, messageCount: existing.message_count || 0, employeeCount: existing.active_employee_count || 0, skipped: true, error: null };
+    return { snapshotId: stateKey, messageCount: (existing.message_count as number) || 0, employeeCount: (existing.active_employee_count as number) || 0, skipped: true, error: null };
   }
 
   const dayStart = `${date}T00:00:00.000Z`;
@@ -115,28 +117,27 @@ export async function synthesizeDay(date: string, org: Org): Promise<{
 
   // Fetch messages for this org by channel_id prefix — active employees only
   const prefixes = ORG_CHANNEL_PREFIXES[org];
-  let allMessages: { content: string; channel_id: string; sender: string; created_at: string; employees: unknown }[] = [];
+  const channelClauses = prefixes.map(() => 'rm.channel_id LIKE ?').join(' OR ');
+  const likeParams = prefixes.map(p => `${p}%`);
 
-  for (const prefix of prefixes) {
-    const { data } = await supabase
-      .from('raven_messages')
-      .select('content, channel_id, sender, created_at, employees(name, status)')
-      .gte('created_at', dayStart)
-      .lte('created_at', dayEnd)
-      .not('content', 'is', null)
-      .like('channel_id', `${prefix}%`)
-      .order('created_at', { ascending: true });
-    if (data) allMessages = allMessages.concat(data);
-  }
+  const { results: rawMessages } = await db
+    .prepare(
+      `SELECT rm.content, rm.channel_id, rm.sender, rm.created_at,
+              e.name AS employee_name, e.status AS employee_status
+       FROM raven_messages rm
+       LEFT JOIN employees e ON rm.employee_id = e.id
+       WHERE rm.created_at >= ? AND rm.created_at <= ?
+         AND rm.content IS NOT NULL
+         AND (${channelClauses})
+       ORDER BY rm.created_at ASC`
+    )
+    .bind(dayStart, dayEnd, ...likeParams)
+    .all<{ content: string; channel_id: string; sender: string; created_at: string; employee_name: string | null; employee_status: string | null }>();
 
   // Filter to active employees only (Raven Intelligence rule)
-  allMessages = allMessages.filter(m => {
-    const emp = m.employees as { name: string; status: string } | null;
-    return !emp || emp.status === 'active'; // include if no employee record or if active
+  let allMessages = (rawMessages || []).filter(m => {
+    return !m.employee_status || m.employee_status === 'active'; // include if no employee record or if active
   });
-
-  // Sort by time
-  allMessages.sort((a, b) => a.created_at.localeCompare(b.created_at));
 
   if (allMessages.length === 0) {
     return { snapshotId: null, messageCount: 0, employeeCount: 0, skipped: true, error: null };
@@ -146,7 +147,7 @@ export async function synthesizeDay(date: string, org: Org): Promise<{
   const messages = allMessages
     .filter(m => m.content && m.content.trim().length >= 3)
     .map(m => ({
-      employeeName: (m.employees as unknown as { name: string } | null)?.name || m.sender,
+      employeeName: m.employee_name || m.sender,
       channel: m.channel_id || null,
       content: m.content,
       time: new Date(m.created_at).toTimeString().slice(0, 5),
@@ -178,10 +179,10 @@ export async function synthesizeDay(date: string, org: Org): Promise<{
       highlights: result.highlights,
       message_count: messages.length,
       active_employee_count: uniqueEmployees.size,
-      created_at: new Date().toISOString(),
+      created_at: now(),
     };
 
-    await setState(supabase, stateKey, snapshot);
+    await setState(db, stateKey, snapshot);
 
     return { snapshotId: stateKey, messageCount: messages.length, employeeCount: uniqueEmployees.size, skipped: false, error: null };
   } catch (err) {
@@ -197,10 +198,10 @@ export async function synthesizeWeek(weekStart: string, org: Org): Promise<{
   skipped: boolean;
   error: string | null;
 }> {
-  const supabase = createAdminClient();
+  const db = getDb();
   const stateKey = `snapshot:week:${org}:${weekStart}`;
 
-  const existing = await getState(supabase, stateKey);
+  const existing = await getState(db, stateKey);
   if (existing?.narrative) {
     return { snapshotId: stateKey, daysFound: 0, skipped: true, error: null };
   }
@@ -213,13 +214,13 @@ export async function synthesizeWeek(weekStart: string, org: Org): Promise<{
   const daySnapshots: { date: string; narrative: string; key_themes: string[]; message_count: number }[] = [];
   for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
     const dateStr = d.toISOString().slice(0, 10);
-    const daySnap = await getState(supabase, `snapshot:day:${org}:${dateStr}`);
+    const daySnap = await getState(db, `snapshot:day:${org}:${dateStr}`);
     if (daySnap?.narrative) {
       daySnapshots.push({
         date: dateStr,
-        narrative: daySnap.narrative,
-        key_themes: daySnap.key_themes || [],
-        message_count: daySnap.message_count || 0,
+        narrative: daySnap.narrative as string,
+        key_themes: (daySnap.key_themes as string[]) || [],
+        message_count: (daySnap.message_count as number) || 0,
       });
     }
   }
@@ -248,10 +249,10 @@ export async function synthesizeWeek(weekStart: string, org: Org): Promise<{
       highlights: result.highlights,
       message_count: totalMessages,
       active_employee_count: 0,
-      created_at: new Date().toISOString(),
+      created_at: now(),
     };
 
-    await setState(supabase, stateKey, snapshot);
+    await setState(db, stateKey, snapshot);
     return { snapshotId: stateKey, daysFound: daySnapshots.length, skipped: false, error: null };
   } catch (err) {
     return { snapshotId: null, daysFound: daySnapshots.length, skipped: false, error: String(err) };
@@ -266,7 +267,7 @@ export async function extractAndUpdateObjectives(org: Org, lookbackDays = 365): 
   stalled: number;
   errors: string[];
 }> {
-  const supabase = createAdminClient();
+  const db = getDb();
 
   const snapshots: { date: string; narrative: string }[] = [];
   const today = new Date();
@@ -275,9 +276,9 @@ export async function extractAndUpdateObjectives(org: Org, lookbackDays = 365): 
     const d = new Date(today);
     d.setDate(d.getDate() - i);
     const dateStr = d.toISOString().slice(0, 10);
-    const snap = await getState(supabase, `snapshot:day:${org}:${dateStr}`);
+    const snap = await getState(db, `snapshot:day:${org}:${dateStr}`);
     if (snap?.narrative) {
-      snapshots.push({ date: dateStr, narrative: snap.narrative });
+      snapshots.push({ date: dateStr, narrative: snap.narrative as string });
     }
   }
 
@@ -285,8 +286,8 @@ export async function extractAndUpdateObjectives(org: Org, lookbackDays = 365): 
     return { created: 0, updated: 0, stalled: 0, errors: [`No day snapshots for ${ORG_LABELS[org]}. Run backfill first.`] };
   }
 
-  const existingState = await getState(supabase, `inferred_objectives:${org}`);
-  const existingObjectives: InferredObjective[] = existingState?.objectives || [];
+  const existingState = await getState(db, `inferred_objectives:${org}`);
+  const existingObjectives: InferredObjective[] = (existingState?.objectives as InferredObjective[]) || [];
 
   const existing = existingObjectives.map(o => ({
     title: o.title, level: o.level, status: o.status, last_seen_at: o.last_seen_at,
@@ -362,8 +363,8 @@ export async function extractAndUpdateObjectives(org: Org, lookbackDays = 365): 
     }
   }
 
-  await setState(supabase, `inferred_objectives:${org}`, {
-    objectives: newObjectives, updated_at: new Date().toISOString(),
+  await setState(db, `inferred_objectives:${org}`, {
+    objectives: newObjectives, updated_at: now(),
   });
 
   return { created, updated, stalled, errors: [] };
@@ -378,28 +379,27 @@ export async function backfillAllDays(org: Org, batchLimit = 20): Promise<{
   remaining: number;
   complete: boolean;
 }> {
-  const supabase = createAdminClient();
+  const db = getDb();
   let processed = 0, skipped = 0;
   const errors: string[] = [];
 
   const cursorKey = `synthesis_backfill_cursor:${org}`;
-  const stateRow = await getState(supabase, cursorKey);
-  const cursor: string | null = stateRow?.last_date_processed || null;
+  const stateRow = await getState(db, cursorKey);
+  const cursor: string | null = (stateRow?.last_date_processed as string) || null;
 
   // Find all dates that have messages for this org (by channel prefix)
   const prefixes = ORG_CHANNEL_PREFIXES[org];
-  let allMsgDates: { created_at: string }[] = [];
+  const channelClauses = prefixes.map(() => 'channel_id LIKE ?').join(' OR ');
+  const likeParams = prefixes.map(p => `${p}%`);
 
-  for (const prefix of prefixes) {
-    const { data } = await supabase
-      .from('raven_messages')
-      .select('created_at')
-      .like('channel_id', `${prefix}%`)
-      .order('created_at', { ascending: true });
-    if (data) allMsgDates = allMsgDates.concat(data);
-  }
+  const { results: allMsgDates } = await db
+    .prepare(
+      `SELECT created_at FROM raven_messages WHERE (${channelClauses}) ORDER BY created_at ASC`
+    )
+    .bind(...likeParams)
+    .all<{ created_at: string }>();
 
-  if (allMsgDates.length === 0) {
+  if (!allMsgDates || allMsgDates.length === 0) {
     return { processed: 0, skipped: 0, errors: [], remaining: 0, complete: true };
   }
 
@@ -416,14 +416,14 @@ export async function backfillAllDays(org: Org, batchLimit = 20): Promise<{
 
   const doneSet = new Set<string>();
   for (const date of batch) {
-    const snap = await getState(supabase, `snapshot:day:${org}:${date}`);
+    const snap = await getState(db, `snapshot:day:${org}:${date}`);
     if (snap?.narrative) doneSet.add(date);
   }
 
   for (const date of batch) {
     if (doneSet.has(date)) {
       skipped++;
-      await setState(supabase, cursorKey, { last_date_processed: date });
+      await setState(db, cursorKey, { last_date_processed: date });
       continue;
     }
 
@@ -441,7 +441,7 @@ export async function backfillAllDays(org: Org, batchLimit = 20): Promise<{
       processed++;
     }
 
-    await setState(supabase, cursorKey, { last_date_processed: date });
+    await setState(db, cursorKey, { last_date_processed: date });
     await new Promise(r => setTimeout(r, 1500));
   }
 
@@ -450,10 +450,10 @@ export async function backfillAllDays(org: Org, batchLimit = 20): Promise<{
 
 // ── Monthly Synthesis (per org — one Gemini call per month) ──────────────────
 
-async function getOrgEmployeeIds(supabase: ReturnType<typeof createAdminClient>, org: Org): Promise<Set<string>> {
-  const state = await getState(supabase, 'org_assignments');
+async function getOrgEmployeeIds(db: D1Database, org: Org): Promise<Set<string>> {
+  const state = await getState(db, 'org_assignments');
   if (!state?.assignments) return new Set();
-  const assignments: Record<string, string> = state.assignments;
+  const assignments: Record<string, string> = state.assignments as Record<string, string>;
   return new Set(Object.entries(assignments).filter(([, o]) => o === org).map(([id]) => id));
 }
 
@@ -464,17 +464,17 @@ export async function synthesizeMonth(month: string, org: Org): Promise<{
   skipped: boolean;
   error: string | null;
 }> {
-  const supabase = createAdminClient();
+  const db = getDb();
   const stateKey = `snapshot:month:${org}:${month}`;
 
   // Check if already done
-  const existing = await getState(supabase, stateKey);
+  const existing = await getState(db, stateKey);
   if (existing?.monthly_narrative) {
-    return { success: true, messageCount: existing.message_count || 0, employeeCount: existing.active_employee_count || 0, skipped: true, error: null };
+    return { success: true, messageCount: (existing.message_count as number) || 0, employeeCount: (existing.active_employee_count as number) || 0, skipped: true, error: null };
   }
 
   // Get org employees
-  const orgEmpIds = await getOrgEmployeeIds(supabase, org);
+  const orgEmpIds = await getOrgEmployeeIds(db, org);
   if (orgEmpIds.size === 0) {
     return { success: false, messageCount: 0, employeeCount: 0, skipped: false, error: `No employees assigned to ${org}. Run "Assign Orgs" first.` };
   }
@@ -484,20 +484,27 @@ export async function synthesizeMonth(month: string, org: Org): Promise<{
   const lastDay = new Date(parseInt(month.slice(0, 4)), parseInt(month.slice(5, 7)), 0).getDate();
   const monthEnd = `${month}-${String(lastDay).padStart(2, '0')}T23:59:59.999Z`;
 
-  const { data: rawMessages } = await supabase
-    .from('raven_messages')
-    .select('content, channel_id, sender, created_at, employee_id, employees(name, status)')
-    .gte('created_at', monthStart)
-    .lte('created_at', monthEnd)
-    .not('content', 'is', null)
-    .in('employee_id', [...orgEmpIds])
-    .order('created_at', { ascending: true });
+  const empIdArr = [...orgEmpIds];
+  const empPlaceholders = placeholders(empIdArr.length);
+
+  const { results: rawMessages } = await db
+    .prepare(
+      `SELECT rm.content, rm.channel_id, rm.sender, rm.created_at, rm.employee_id,
+              e.name AS employee_name, e.status AS employee_status
+       FROM raven_messages rm
+       LEFT JOIN employees e ON rm.employee_id = e.id
+       WHERE rm.created_at >= ? AND rm.created_at <= ?
+         AND rm.content IS NOT NULL
+         AND rm.employee_id IN ${empPlaceholders}
+       ORDER BY rm.created_at ASC`
+    )
+    .bind(monthStart, monthEnd, ...empIdArr)
+    .all<{ content: string; channel_id: string; sender: string; created_at: string; employee_id: string; employee_name: string | null; employee_status: string | null }>();
 
   // Filter to active employees only (Raven Intelligence rule) and non-empty content
   const allMessages = (rawMessages || []).filter(m => {
     if (!m.content || m.content.trim().length < 3) return false;
-    const emp = m.employees as unknown as { name: string; status: string } | null;
-    return !emp || emp.status === 'active';
+    return !m.employee_status || m.employee_status === 'active';
   });
 
   if (allMessages.length === 0) {
@@ -505,7 +512,7 @@ export async function synthesizeMonth(month: string, org: Org): Promise<{
   }
 
   const messages = allMessages.map(m => ({
-    employeeName: (m.employees as unknown as { name: string } | null)?.name || m.sender,
+    employeeName: m.employee_name || m.sender,
     channel: m.channel_id || null,
     content: m.content,
     date: m.created_at.slice(0, 10),
@@ -518,19 +525,19 @@ export async function synthesizeMonth(month: string, org: Org): Promise<{
     const result = await synthesizeCompanyMonth(month, ORG_LABELS[org], messages, uniqueEmployees);
 
     // Store the monthly snapshot
-    await setState(supabase, stateKey, {
+    await setState(db, stateKey, {
       ...result,
       org,
       month,
       message_count: messages.length,
       active_employee_count: uniqueEmployees.length,
-      created_at: new Date().toISOString(),
+      created_at: now(),
     });
 
     // Derive backward-compatible daily snapshot keys from weekly_breakdowns
     for (const week of result.weekly_breakdowns || []) {
       const weekKey = `snapshot:week:${org}:${week.week_start}`;
-      await setState(supabase, weekKey, {
+      await setState(db, weekKey, {
         period_type: 'week',
         period_start: week.week_start,
         period_end: week.week_end,
@@ -542,14 +549,14 @@ export async function synthesizeMonth(month: string, org: Org): Promise<{
         highlights: week.highlights || [],
         message_count: 0,
         active_employee_count: 0,
-        created_at: new Date().toISOString(),
+        created_at: now(),
       });
     }
 
     // Derive daily highlight keys
     for (const day of result.daily_highlights || []) {
       const dayKey = `snapshot:day:${org}:${day.date}`;
-      await setState(supabase, dayKey, {
+      await setState(db, dayKey, {
         period_type: 'day',
         period_start: day.date,
         period_end: day.date,
@@ -561,7 +568,7 @@ export async function synthesizeMonth(month: string, org: Org): Promise<{
         highlights: [],
         message_count: 0,
         active_employee_count: 0,
-        created_at: new Date().toISOString(),
+        created_at: now(),
       });
     }
 
@@ -576,15 +583,15 @@ export async function computeTrajectories(month: string, org: Org): Promise<{
   employeeCount: number;
   error: string | null;
 }> {
-  const supabase = createAdminClient();
+  const db = getDb();
   const stateKey = `trajectories:${org}:${month}`;
 
-  const existing = await getState(supabase, stateKey);
-  if (existing?.employees && Object.keys(existing.employees).length > 0) {
-    return { success: true, employeeCount: Object.keys(existing.employees).length, error: null };
+  const existing = await getState(db, stateKey);
+  if (existing?.employees && Object.keys(existing.employees as Record<string, unknown>).length > 0) {
+    return { success: true, employeeCount: Object.keys(existing.employees as Record<string, unknown>).length, error: null };
   }
 
-  const orgEmpIds = await getOrgEmployeeIds(supabase, org);
+  const orgEmpIds = await getOrgEmployeeIds(db, org);
   if (orgEmpIds.size === 0) {
     return { success: false, employeeCount: 0, error: `No employees for ${org}` };
   }
@@ -593,19 +600,26 @@ export async function computeTrajectories(month: string, org: Org): Promise<{
   const lastDay = new Date(parseInt(month.slice(0, 4)), parseInt(month.slice(5, 7)), 0).getDate();
   const monthEnd = `${month}-${String(lastDay).padStart(2, '0')}T23:59:59.999Z`;
 
-  const { data: rawMessages } = await supabase
-    .from('raven_messages')
-    .select('content, channel_id, sender, created_at, employee_id, employees(name, email, status)')
-    .gte('created_at', monthStart)
-    .lte('created_at', monthEnd)
-    .not('content', 'is', null)
-    .in('employee_id', [...orgEmpIds])
-    .order('created_at', { ascending: true });
+  const empIdArr = [...orgEmpIds];
+  const empPlaceholders = placeholders(empIdArr.length);
+
+  const { results: rawMessages } = await db
+    .prepare(
+      `SELECT rm.content, rm.channel_id, rm.sender, rm.created_at, rm.employee_id,
+              e.name AS employee_name, e.email AS employee_email, e.status AS employee_status
+       FROM raven_messages rm
+       LEFT JOIN employees e ON rm.employee_id = e.id
+       WHERE rm.created_at >= ? AND rm.created_at <= ?
+         AND rm.content IS NOT NULL
+         AND rm.employee_id IN ${empPlaceholders}
+       ORDER BY rm.created_at ASC`
+    )
+    .bind(monthStart, monthEnd, ...empIdArr)
+    .all<{ content: string; channel_id: string; sender: string; created_at: string; employee_id: string; employee_name: string | null; employee_email: string | null; employee_status: string | null }>();
 
   // Filter to active employees only (Raven Intelligence rule)
   const activeMessages = (rawMessages || []).filter(m => {
-    const emp = m.employees as unknown as { name: string; email: string; status: string } | null;
-    return !emp || emp.status === 'active';
+    return !m.employee_status || m.employee_status === 'active';
   });
 
   if (!activeMessages || activeMessages.length === 0) {
@@ -620,12 +634,11 @@ export async function computeTrajectories(month: string, org: Org): Promise<{
   }>();
 
   for (const m of activeMessages) {
-    const emp = m.employees as unknown as { name: string; email: string; status: string } | null;
     const empId = m.employee_id || m.sender;
     if (!byEmployee.has(empId)) {
       byEmployee.set(empId, {
-        name: emp?.name || m.sender,
-        email: emp?.email || m.sender,
+        name: m.employee_name || m.sender,
+        email: m.employee_email || m.sender,
         messages: [],
       });
     }
@@ -647,9 +660,9 @@ export async function computeTrajectories(month: string, org: Org): Promise<{
       trajMap[t.email] = t;
     }
 
-    await setState(supabase, stateKey, {
+    await setState(db, stateKey, {
       employees: trajMap,
-      updated_at: new Date().toISOString(),
+      updated_at: now(),
     });
 
     return { success: true, employeeCount: trajectories.length, error: null };
@@ -663,39 +676,40 @@ export async function backfillMonths(org: Org, monthsBack = 12): Promise<{
   skipped: number;
   errors: string[];
 }> {
-  const supabase = createAdminClient();
+  const db = getDb();
   let processed = 0, skipped = 0;
   const errors: string[] = [];
 
   // Find the date range of messages for this org
-  const orgEmpIds = await getOrgEmployeeIds(supabase, org);
+  const orgEmpIds = await getOrgEmployeeIds(db, org);
   if (orgEmpIds.size === 0) {
     return { processed: 0, skipped: 0, errors: [`No employees assigned to ${org}`] };
   }
 
-  const { data: earliest } = await supabase
-    .from('raven_messages')
-    .select('created_at')
-    .in('employee_id', [...orgEmpIds])
-    .order('created_at', { ascending: true })
-    .limit(1);
+  const empIdArr = [...orgEmpIds];
+  const empPlaceholders = placeholders(empIdArr.length);
 
-  if (!earliest || earliest.length === 0) {
+  const earliest = await db
+    .prepare(
+      `SELECT created_at FROM raven_messages WHERE employee_id IN ${empPlaceholders} ORDER BY created_at ASC LIMIT 1`
+    )
+    .bind(...empIdArr)
+    .first<{ created_at: string }>();
+
+  if (!earliest) {
     return { processed: 0, skipped: 0, errors: [] };
   }
 
-  const startDate = new Date(earliest[0].created_at);
-  const startMonth = `${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2, '0')}`;
-  const now = new Date();
-  const endMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const startDate = new Date(earliest.created_at);
+  const currentNow = new Date();
 
   // Generate list of months from start to end
   const months: string[] = [];
-  const cursor = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
-  const limit = new Date(now.getFullYear(), now.getMonth(), 1);
-  while (cursor <= limit && months.length < monthsBack) {
-    months.push(`${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}`);
-    cursor.setMonth(cursor.getMonth() + 1);
+  const cursorDate = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
+  const limit = new Date(currentNow.getFullYear(), currentNow.getMonth(), 1);
+  while (cursorDate <= limit && months.length < monthsBack) {
+    months.push(`${cursorDate.getFullYear()}-${String(cursorDate.getMonth() + 1).padStart(2, '0')}`);
+    cursorDate.setMonth(cursorDate.getMonth() + 1);
   }
 
   for (const month of months) {

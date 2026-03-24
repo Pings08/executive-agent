@@ -1,15 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createServerSupabaseClient } from '@/lib/supabase/server';
+import { getDb } from '@/lib/d1/client';
 import { fetchAlerts, markAlertRead, resolveAlert } from '@/lib/dal/alerts';
 
 export async function GET(request: NextRequest) {
-  const supabase = await createServerSupabaseClient();
-  const url = new URL(request.url);
-  const unread = url.searchParams.get('unread') === 'true';
-  const severity = url.searchParams.get('severity');
-
   try {
-    const alerts = await fetchAlerts(supabase, {
+    const db = getDb();
+    const url = new URL(request.url);
+    const unread = url.searchParams.get('unread') === 'true';
+    const severity = url.searchParams.get('severity');
+
+    const alerts = await fetchAlerts(db, {
       unreadOnly: unread,
       severity: severity || undefined,
       limit: 50,
@@ -22,15 +22,14 @@ export async function GET(request: NextRequest) {
 }
 
 export async function PATCH(request: NextRequest) {
-  const supabase = await createServerSupabaseClient();
-
   try {
+    const db = getDb();
     const { id, action } = await request.json();
 
     if (action === 'read') {
-      await markAlertRead(supabase, id);
+      await markAlertRead(db, id);
     } else if (action === 'resolve') {
-      await resolveAlert(supabase, id);
+      await resolveAlert(db, id);
     } else {
       return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
     }

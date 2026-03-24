@@ -9,7 +9,7 @@ import { generateAlerts } from '@/lib/alerts/generator';
  * Use from Settings when you have a large backlog.
  */
 export async function POST(req: Request) {
-  const { maxBatches = 10 } = await req.json().catch(() => ({}));
+  const { maxBatches = 500 } = await req.json().catch(() => ({}));
 
   let totalProcessed = 0;
   const allErrors: string[] = [];
@@ -18,7 +18,7 @@ export async function POST(req: Request) {
 
   // Keep draining until empty or safety cap reached
   while (remaining > 0 && batchesRun < maxBatches) {
-    const result = await processUnanalyzedMessages(20);
+    const result = await processUnanalyzedMessages(50);
     totalProcessed += result.processedCount;
     allErrors.push(...result.errors);
     remaining = result.remaining;
@@ -42,5 +42,7 @@ export async function POST(req: Request) {
     remainingPending: remaining === Infinity ? 0 : remaining,
     alertsCreated,
     errors: allErrors,
+    // First error surfaced directly so the UI can show it without parsing the array
+    firstError: allErrors.length > 0 ? allErrors[0] : null,
   });
 }

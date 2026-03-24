@@ -183,9 +183,9 @@ export default function Dashboard() {
           <div className="flex-1">
             <p className="text-sm font-bold text-red-400">{fetchError}</p>
             <p className="text-xs text-secondary mt-0.5">
-              Check your Supabase dashboard — your project may be paused. Go to{' '}
-              <a href="https://supabase.com/dashboard" target="_blank" rel="noopener noreferrer" className="text-accent underline">supabase.com/dashboard</a>
-              {' '}and restore it if needed.
+              Check your Cloudflare D1 database status. Go to{' '}
+              <a href="https://dash.cloudflare.com" target="_blank" rel="noopener noreferrer" className="text-accent underline">Cloudflare Dashboard</a>
+              {' '}and verify your D1 database is accessible.
             </p>
           </div>
           <button onClick={() => fetchCompanyData(selectedOrg)} className="text-xs font-bold text-accent hover:underline shrink-0">

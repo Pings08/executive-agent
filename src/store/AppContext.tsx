@@ -1,26 +1,10 @@
 'use client';
 
-import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
 import type {
   Objective, Employee, Alert, MessageAnalysis, SubPoint, Status, Priority,
   WorkUpdate, Note, SearchResult,
 } from '@/types';
-import { createClient } from '@/lib/supabase/client';
-import {
-  fetchEmployees as dalFetchEmployees,
-  fetchObjectives as dalFetchObjectives,
-  createObjective as dalCreateObjective,
-  updateObjective as dalUpdateObjective,
-  deleteObjective as dalDeleteObjective,
-  createTask as dalCreateTask,
-  updateTask as dalUpdateTask,
-  deleteTask as dalDeleteTask,
-  fetchAlerts as dalFetchAlerts,
-  fetchUnreadAlertCount as dalFetchUnreadAlertCount,
-  markAlertRead as dalMarkAlertRead,
-  resolveAlert as dalResolveAlert,
-  fetchAnalyses as dalFetchAnalyses,
-} from '@/lib/dal';
 
 interface AppContextType {
   // Data
@@ -66,7 +50,6 @@ interface AppContextType {
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
-  const [supabase] = useState(() => createClient());
   const [objectives, setObjectives] = useState<Objective[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [alerts, setAlerts] = useState<Alert[]>([]);
@@ -81,12 +64,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [notes] = useState<Note[]>([]);
   const [searchResults] = useState<SearchResult[]>([]);
 
-  const isSupabaseConfigured =
-    process.env.NEXT_PUBLIC_SUPABASE_URL?.startsWith('https://') &&
-    !process.env.NEXT_PUBLIC_SUPABASE_URL?.includes('YOUR_PROJECT');
+  // Ref to prevent duplicate polling intervals
+  const alertPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Deduplicate arrays by id — prevents React duplicate-key warnings when
-  // realtime subscriptions and refreshData overlap in the same render cycle.
+  // polling and refreshData overlap in the same render cycle.
   function dedupe<T extends { id: string }>(arr: T[]): T[] {
     const seen = new Set<string>();
     return arr.filter(item => {
@@ -97,34 +79,39 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }
 
   const refreshData = useCallback(async () => {
-    if (!isSupabaseConfigured) {
-      console.warn('Supabase not configured — fill in .env.local to connect');
-      return;
-    }
     try {
-      // Fetch essential data first (2 queries instead of 5)
-      const [emps, objs] = await Promise.all([
-        dalFetchEmployees(supabase),
-        dalFetchObjectives(supabase),
-      ]);
-      setEmployees(dedupe(emps));
-      setObjectives(dedupe(objs));
+      const res = await fetch('/api/data');
+      if (!res.ok) {
+        console.error('Failed to fetch data:', res.status, res.statusText);
+        return;
+      }
+      const data = await res.json();
 
-      // Fetch non-critical data lazily (don't block page load)
-      Promise.all([
-        dalFetchAlerts(supabase, { unresolvedOnly: true, limit: 10 }),
-        dalFetchUnreadAlertCount(supabase),
-        dalFetchAnalyses(supabase, { limit: 10 }),
-      ]).then(([alts, alertCount, analyses]) => {
-        setAlerts(dedupe(alts));
-        setUnreadAlertCount(alertCount);
-        setRecentAnalyses(dedupe(analyses));
-      }).catch(() => { /* non-critical */ });
+      if (data.employees) setEmployees(dedupe(data.employees));
+      if (data.objectives) setObjectives(dedupe(data.objectives));
+      if (data.alerts) setAlerts(dedupe(data.alerts));
+      if (data.analyses) setRecentAnalyses(dedupe(data.analyses));
+      if (data.unreadAlertCount !== undefined) setUnreadAlertCount(data.unreadAlertCount);
     } catch (err) {
       const msg = err instanceof Error ? err.message : JSON.stringify(err);
-      console.error('Failed to fetch data from Supabase:', msg, err);
+      console.error('Failed to fetch data:', msg, err);
     }
-  }, [supabase]);
+  }, []);
+
+  // Poll alerts every 30 seconds (replaces Supabase realtime subscriptions)
+  const pollAlerts = useCallback(async () => {
+    try {
+      const res = await fetch('/api/data?alerts_only=true');
+      if (!res.ok) return;
+      const data = await res.json();
+
+      if (data.alerts) setAlerts(dedupe(data.alerts));
+      if (data.unreadAlertCount !== undefined) setUnreadAlertCount(data.unreadAlertCount);
+      if (data.analyses) setRecentAnalyses(dedupe(data.analyses));
+    } catch {
+      // Silent fail — polling is non-critical
+    }
+  }, []);
 
   // Initial data load
   useEffect(() => {
@@ -132,63 +119,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     refreshData().finally(() => setIsLoading(false));
   }, [refreshData]);
 
-  // Realtime subscriptions
+  // Alert polling (replaces realtime subscriptions) — every 30 seconds
   useEffect(() => {
-    const alertChannel = supabase
-      .channel('alerts-realtime')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'alerts' }, (payload) => {
-        const a = payload.new;
-        const newAlert: Alert = {
-          id: a.id,
-          type: a.type,
-          severity: a.severity,
-          title: a.title,
-          description: a.description,
-          employeeId: a.employee_id ?? undefined,
-          objectiveId: a.objective_id ?? undefined,
-          isRead: a.is_read,
-          isResolved: a.is_resolved,
-          createdAt: a.created_at,
-        };
-        setAlerts(prev => prev.some(a => a.id === newAlert.id) ? prev : [newAlert, ...prev]);
-        setUnreadAlertCount(prev => prev + 1);
-      })
-      .subscribe();
-
-    const analysisChannel = supabase
-      .channel('analyses-realtime')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'message_analyses' }, (payload) => {
-        const a = payload.new;
-        const newAnalysis: MessageAnalysis = {
-          id: a.id,
-          ravenMessageId: a.raven_message_id,
-          employeeId: a.employee_id ?? undefined,
-          relatedObjectiveId: a.related_objective_id ?? undefined,
-          category: a.category,
-          sentiment: a.sentiment,
-          productivityScore: a.productivity_score ?? undefined,
-          summary: a.summary ?? undefined,
-          keyTopics: a.key_topics ?? undefined,
-          blockerDetected: a.blocker_detected,
-          blockerDescription: a.blocker_description ?? undefined,
-          createdAt: a.created_at,
-        };
-        setRecentAnalyses(prev =>
-          prev.some(a => a.id === newAnalysis.id) ? prev : [newAnalysis, ...prev].slice(0, 50)
-        );
-      })
-      .subscribe();
-
+    if (alertPollRef.current) clearInterval(alertPollRef.current);
+    alertPollRef.current = setInterval(pollAlerts, 30_000);
     return () => {
-      supabase.removeChannel(alertChannel);
-      supabase.removeChannel(analysisChannel);
+      if (alertPollRef.current) clearInterval(alertPollRef.current);
     };
-  }, [supabase]);
+  }, [pollAlerts]);
 
-  // Auto-sync ERP data on startup, then poll for new messages every 2 min
+  // Auto-sync ERP data on startup, then poll for new messages every 10 min
   useEffect(() => {
-    if (!isSupabaseConfigured) return;
-
     const fetchWithTimeout = (url: string, opts: RequestInit = {}, ms = 10000) => {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), ms);
@@ -197,14 +138,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
     const syncAndIngest = async () => {
       try {
+        setIsSyncing(true);
         // Sync employees/projects/tasks from ERPNext first (10s timeout)
         await fetchWithTimeout('/api/pipeline/sync', { method: 'POST' }, 10000);
         // Then ingest new Raven messages (10s timeout)
         await fetchWithTimeout('/api/pipeline/ingest', { method: 'POST' }, 10000);
         // Refresh UI state after pipeline runs
         await refreshData();
+        setLastSyncedAt(new Date().toISOString());
       } catch {
         // Silent fail — sync may time out but page should still load
+      } finally {
+        setIsSyncing(false);
       }
     };
 
@@ -219,35 +164,30 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
     // On mount: defer sync so it doesn't block initial page load
     const syncTimeout = setTimeout(syncAndIngest, 5000);
-    // Every 10 min: ingest only (reduced to ease Supabase load)
+    // Every 10 min: ingest only
     const interval = setInterval(pollIngest, 600_000);
     return () => { clearTimeout(syncTimeout); clearInterval(interval); };
   }, [refreshData]);
 
-  // Objective mutations
+  // Objective mutations — call API routes, then optimistically update local state
   const addObjective = async (data: Omit<Objective, 'id' | 'createdAt' | 'updatedAt' | 'subPoints'>) => {
-    const newObj = await dalCreateObjective(supabase, {
-      title: data.title,
-      description: data.description,
-      status: data.status,
-      priority: data.priority,
-      startDate: data.startDate,
-      endDate: data.endDate,
-      assigneeIds: data.assigneeIds,
+    const res = await fetch('/api/objectives', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
     });
+    if (!res.ok) throw new Error('Failed to create objective');
+    const { objective: newObj } = await res.json();
     setObjectives(prev => [newObj, ...prev]);
   };
 
   const updateObjective = async (id: string, updates: Partial<Objective>) => {
-    await dalUpdateObjective(supabase, id, {
-      title: updates.title,
-      description: updates.description,
-      status: updates.status,
-      priority: updates.priority,
-      startDate: updates.startDate,
-      endDate: updates.endDate,
-      assigneeIds: updates.assigneeIds,
+    const res = await fetch('/api/objectives', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, ...updates }),
     });
+    if (!res.ok) throw new Error('Failed to update objective');
     setObjectives(prev =>
       prev.map(obj =>
         obj.id === id ? { ...obj, ...updates, updatedAt: new Date().toISOString() } : obj
@@ -256,21 +196,24 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   };
 
   const deleteObjective = async (id: string) => {
-    await dalDeleteObjective(supabase, id);
+    const res = await fetch('/api/objectives', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    });
+    if (!res.ok) throw new Error('Failed to delete objective');
     setObjectives(prev => prev.filter(obj => obj.id !== id));
   };
 
   // Task/SubPoint mutations
   const addSubPoint = async (objectiveId: string, subPoint: Omit<SubPoint, 'id' | 'createdAt' | 'updatedAt' | 'subPoints'>) => {
-    const task = await dalCreateTask(supabase, {
-      objectiveId,
-      title: subPoint.title,
-      description: subPoint.description,
-      status: subPoint.status,
-      assigneeId: subPoint.assigneeId || undefined,
-      startDate: subPoint.startDate || undefined,
-      endDate: subPoint.endDate || undefined,
+    const res = await fetch('/api/tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ objectiveId, ...subPoint }),
     });
+    if (!res.ok) throw new Error('Failed to create task');
+    const { task } = await res.json();
     const newSp: SubPoint = {
       id: task.id,
       title: task.title,
@@ -293,14 +236,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   };
 
   const updateSubPoint = async (_objectiveId: string, subPointId: string, updates: Partial<SubPoint>) => {
-    await dalUpdateTask(supabase, subPointId, {
-      title: updates.title,
-      description: updates.description,
-      status: updates.status,
-      assigneeId: updates.assigneeId,
-      startDate: updates.startDate,
-      endDate: updates.endDate,
+    const res = await fetch('/api/tasks', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: subPointId, ...updates }),
     });
+    if (!res.ok) throw new Error('Failed to update task');
     setObjectives(prev =>
       prev.map(obj => ({
         ...obj,
@@ -312,7 +253,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   };
 
   const deleteSubPoint = async (_objectiveId: string, subPointId: string) => {
-    await dalDeleteTask(supabase, subPointId);
+    const res = await fetch('/api/tasks', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: subPointId }),
+    });
+    if (!res.ok) throw new Error('Failed to delete task');
     setObjectives(prev =>
       prev.map(obj => ({
         ...obj,
@@ -322,16 +268,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   };
 
   const addNestedSubPoint = async (objectiveId: string, parentSubPointId: string, subPoint: Omit<SubPoint, 'id' | 'createdAt' | 'updatedAt' | 'subPoints'>) => {
-    const task = await dalCreateTask(supabase, {
-      objectiveId,
-      parentTaskId: parentSubPointId,
-      title: subPoint.title,
-      description: subPoint.description,
-      status: subPoint.status,
-      assigneeId: subPoint.assigneeId || undefined,
-      startDate: subPoint.startDate || undefined,
-      endDate: subPoint.endDate || undefined,
+    const res = await fetch('/api/tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ objectiveId, parentTaskId: parentSubPointId, ...subPoint }),
     });
+    if (!res.ok) throw new Error('Failed to create nested task');
+    const { task } = await res.json();
     const newSp: SubPoint = {
       id: task.id,
       title: task.title,
@@ -361,14 +304,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   };
 
   const updateNestedSubPoint = async (_objectiveId: string, _parentSubPointId: string, nestedSubPointId: string, updates: Partial<SubPoint>) => {
-    await dalUpdateTask(supabase, nestedSubPointId, {
-      title: updates.title,
-      description: updates.description,
-      status: updates.status,
-      assigneeId: updates.assigneeId,
-      startDate: updates.startDate,
-      endDate: updates.endDate,
+    const res = await fetch('/api/tasks', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: nestedSubPointId, ...updates }),
     });
+    if (!res.ok) throw new Error('Failed to update nested task');
     setObjectives(prev =>
       prev.map(obj => ({
         ...obj,
@@ -383,7 +324,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   };
 
   const deleteNestedSubPoint = async (_objectiveId: string, _parentSubPointId: string, nestedSubPointId: string) => {
-    await dalDeleteTask(supabase, nestedSubPointId);
+    const res = await fetch('/api/tasks', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: nestedSubPointId }),
+    });
+    if (!res.ok) throw new Error('Failed to delete nested task');
     setObjectives(prev =>
       prev.map(obj => ({
         ...obj,
@@ -395,15 +341,25 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     );
   };
 
-  // Alert actions
+  // Alert actions — call API routes
   const markAlertAsRead = async (id: string) => {
-    await dalMarkAlertRead(supabase, id);
+    const res = await fetch('/api/alerts', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, action: 'read' }),
+    });
+    if (!res.ok) throw new Error('Failed to mark alert as read');
     setAlerts(prev => prev.map(a => a.id === id ? { ...a, isRead: true } : a));
     setUnreadAlertCount(prev => Math.max(0, prev - 1));
   };
 
   const resolveAlertById = async (id: string) => {
-    await dalResolveAlert(supabase, id);
+    const res = await fetch('/api/alerts', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, action: 'resolve' }),
+    });
+    if (!res.ok) throw new Error('Failed to resolve alert');
     setAlerts(prev => prev.map(a => a.id === id ? { ...a, isResolved: true } : a));
   };
 

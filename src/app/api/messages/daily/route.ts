@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createAdminClient } from '@/lib/supabase/admin';
+import { getDb } from '@/lib/d1/client';
 
 const BASE = process.env.ERPNEXT_BASE_URL!;
 const AUTH = `token ${process.env.ERPNEXT_API_KEY}:${process.env.ERPNEXT_API_SECRET}`;
@@ -9,50 +9,61 @@ export async function GET(req: NextRequest) {
   if (!date) return NextResponse.json({ error: 'date required' }, { status: 400 });
 
   try {
-    const supabase = createAdminClient();
+    const db = getDb();
     const dayStart = `${date}T00:00:00`;
     const dayEnd = `${date}T23:59:59`;
 
-    // Fetch in parallel: messages, channel→workspace map, workspace members, employees
-    const [messagesRes, channelsRes, wsMembersRes, employeesRes] = await Promise.all([
-      supabase
-        .from('raven_messages')
-        .select('id, content, sender, channel_id, channel_name, created_at, employee_id, employees(name)')
-        .gte('created_at', dayStart)
-        .lte('created_at', dayEnd)
-        .order('created_at', { ascending: true }),
+    // Fetch messages with employee name via JOIN, ERPNext channel/workspace data in parallel
+    const [messagesResult, channelsRes, wsMembersRes, employeesResult] = await Promise.all([
+      db
+        .prepare(
+          `SELECT rm.id, rm.content, rm.sender, rm.channel_id, rm.channel_name, rm.created_at, rm.employee_id,
+                  e.name as employee_name
+           FROM raven_messages rm
+           LEFT JOIN employees e ON rm.employee_id = e.id
+           WHERE rm.created_at >= ? AND rm.created_at <= ?
+           ORDER BY rm.created_at ASC`
+        )
+        .bind(dayStart, dayEnd)
+        .all<{
+          id: string; content: string; sender: string; channel_id: string | null;
+          channel_name: string | null; created_at: string; employee_id: string | null;
+          employee_name: string | null;
+        }>(),
       fetch(`${BASE}/api/resource/Raven%20Channel?fields=${encodeURIComponent('["name","channel_name","workspace"]')}&limit_page_length=500`, {
         headers: { Authorization: AUTH },
       }).then(r => r.json()).then(d => d.data || []),
       fetch(`${BASE}/api/resource/Raven%20Workspace%20Member?fields=${encodeURIComponent('["user","workspace"]')}&limit_page_length=1000`, {
         headers: { Authorization: AUTH },
       }).then(r => r.json()).then(d => d.data || []),
-      supabase.from('employees').select('id, name, email, raven_user').eq('status', 'active'),
+      db
+        .prepare("SELECT id, name, email, raven_user FROM employees WHERE status = 'active'")
+        .all<{ id: string; name: string; email: string | null; raven_user: string | null }>(),
     ]);
 
-    const messages = messagesRes.data || [];
-    const empList = employeesRes.data || [];
+    const messages = messagesResult.results || [];
+    const empList = employeesResult.results || [];
 
-    // Channel ID → workspace name
+    // Channel ID -> workspace name
     const channelWorkspace = new Map<string, string>();
     for (const ch of channelsRes) {
       if (ch.workspace) channelWorkspace.set(ch.name, ch.workspace);
     }
 
-    // User email → primary workspace (from workspace membership)
+    // User email -> primary workspace (from workspace membership)
     const userWorkspaceMap = new Map<string, string>();
     for (const m of wsMembersRes) {
       if (!userWorkspaceMap.has(m.user)) userWorkspaceMap.set(m.user, m.workspace);
     }
 
-    // Employee ID → email for workspace fallback
+    // Employee ID -> email for workspace fallback
     const empEmailMap = new Map<string, string>();
     for (const e of empList) {
       empEmailMap.set(e.id, e.email || e.raven_user || '');
     }
 
     // Resolve workspace for each message
-    type MsgRow = typeof messages[number] & { employees?: { name: string } | null };
+    type MsgRow = typeof messages[number];
     type GroupedMember = {
       id: string | null;
       name: string;
@@ -67,7 +78,7 @@ export async function GET(req: NextRequest) {
     const wsGroups = new Map<string, WorkspaceGroup>();
 
     for (const msg of messages as MsgRow[]) {
-      // 1. Try channel → workspace
+      // 1. Try channel -> workspace
       let ws = msg.channel_id ? channelWorkspace.get(msg.channel_id) : null;
       // 2. Fallback: sender's primary workspace from membership
       if (!ws) {
@@ -86,7 +97,7 @@ export async function GET(req: NextRequest) {
       const group = wsGroups.get(ws)!;
       group.messageCount++;
 
-      const empName = (msg.employees as { name: string } | null)?.name || msg.sender.split('@')[0].replace(/[._]/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase());
+      const empName = msg.employee_name || msg.sender.split('@')[0].replace(/[._]/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase());
       const empId = msg.employee_id || msg.sender;
 
       if (!group.members.has(empId)) {

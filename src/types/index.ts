@@ -35,6 +35,20 @@ export interface Objective {
   updatedAt: string;
 }
 
+export type Workspace = 'biotech' | 'tcr' | 'sentient_x';
+
+export const WORKSPACE_LABELS: Record<Workspace, string> = {
+  biotech: 'ExRNA / VVB',
+  tcr: 'TCR',
+  sentient_x: 'Sentient',
+};
+
+export const WORKSPACE_COLORS: Record<Workspace, string> = {
+  biotech: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
+  tcr: 'bg-purple-500/15 text-purple-400 border-purple-500/30',
+  sentient_x: 'bg-cyan-500/15 text-cyan-400 border-cyan-500/30',
+};
+
 export interface Employee {
   id: string;
   name: string;
@@ -43,6 +57,7 @@ export interface Employee {
   avatar?: string;
   status?: string;
   ravenUser?: string;
+  workspace?: Workspace;
   dateOfJoining?: string;
   createdAt: string;
 }

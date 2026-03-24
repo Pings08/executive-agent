@@ -5,6 +5,9 @@ export type Sentiment = 'positive' | 'neutral' | 'negative' | 'frustrated' | 'st
 export type AlertType = 'blocker_detected' | 'slowdown' | 'missed_deadline' | 'sentiment_drop' | 'no_activity' | 'objective_at_risk';
 export type AlertSeverity = 'low' | 'medium' | 'high' | 'critical';
 
+import { Workspace } from './index';
+export type { Workspace };
+
 export interface DbEmployee {
   id: string;
   erp_id: string | null;
@@ -15,6 +18,7 @@ export interface DbEmployee {
   status: string;
   date_of_joining: string | null;
   raven_user: string | null;
+  workspace: Workspace | null;
   created_at: string;
   updated_at: string;
 }
