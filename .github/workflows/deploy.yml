@@ -1,4 +1,4 @@
-name: Deploy to Cloudflare Pages
+name: Deploy to Cloudflare
 
 on:
   push:
@@ -25,9 +25,6 @@ jobs:
       - name: Build for Cloudflare
         run: npm run build:cloudflare
 
-      - name: Prepare Pages output
-        run: cp .open-next/worker.js .open-next/assets/_worker.js
-
       - name: Apply D1 schema
         uses: cloudflare/wrangler-action@v3
         with:
@@ -36,9 +33,9 @@ jobs:
           command: d1 execute executive-agent-db --remote --file=./d1/schema.sql
         continue-on-error: true
 
-      - name: Deploy to Cloudflare Pages
+      - name: Deploy
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy .open-next/assets --project-name=executive-agent --no-bundle
+          command: deploy
