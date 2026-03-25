@@ -22,7 +22,7 @@ jobs:
       - name: Install dependencies
         run: npm ci --legacy-peer-deps
 
-      - name: Build
+      - name: Build (Next.js + OpenNext)
         run: npm run build
 
       - name: Apply D1 schema
@@ -33,9 +33,9 @@ jobs:
           command: d1 execute executive-agent-db --remote --file=./d1/schema.sql
         continue-on-error: true
 
-      - name: Deploy to Cloudflare Pages
+      - name: Deploy to Cloudflare
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy .next --project-name=executive-agent
+          command: deploy

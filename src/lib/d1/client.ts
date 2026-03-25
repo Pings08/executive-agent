@@ -13,29 +13,23 @@ let _db: D1Database | null = null;
 export function getDb(): D1Database {
   if (_db) return _db;
 
-  // Try Cloudflare Workers/Pages binding via globalThis or process.env
-  // wrangler injects D1 bindings into the global scope
+  // Try @opennextjs/cloudflare context (recommended for Next.js on Cloudflare)
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getCloudflareContext } = require('@opennextjs/cloudflare');
+    const ctx = getCloudflareContext();
+    if (ctx?.env?.DB) {
+      return ctx.env.DB as D1Database;
+    }
+  } catch {
+    // Not in OpenNext context
+  }
+
+  // Fallback: try globalThis bindings (wrangler dev injects these)
   const g = globalThis as Record<string, unknown>;
   if (g.DB) {
     _db = g.DB as D1Database;
     return _db!;
-  }
-  if (g.__D1_DB) {
-    _db = g.__D1_DB as D1Database;
-    return _db!;
-  }
-
-  // Try dynamic import for @cloudflare/next-on-pages if available
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const mod = require('@cloudflare/next-on-pages');
-    const ctx = mod.getRequestContext?.();
-    if (ctx?.env?.DB) {
-      _db = ctx.env.DB;
-      return _db!;
-    }
-  } catch {
-    // Package not available
   }
 
   throw new Error(
