@@ -5,4 +5,4 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "executive-agent-db"
-database_id = "TO_BE_FILLED_AFTER_CREATION"
+database_id = "bd8180c4-e63b-44df-ba6e-1cd6f081bad6"
