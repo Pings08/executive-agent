@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useApp } from '@/store/AppContext';
@@ -13,20 +13,45 @@ import {
   ChevronLeft,
   Menu,
   Bell,
+  Users,
+  Building2,
 } from 'lucide-react';
+import { WORKSPACE_LABELS, WORKSPACE_COLORS, type Workspace } from '@/types';
 
 const navItems = [
   { href: '/', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/messages', label: 'Messages', icon: MessageSquare },
   { href: '/objectives', label: 'Objectives', icon: Target },
+  { href: '/team', label: 'Team', icon: Users },
   { href: '/analytics', label: 'Analytics', icon: BarChart3 },
   { href: '/settings', label: 'Settings', icon: Settings },
 ];
+
+const ALL_ORGS: Workspace[] = ['biotech', 'tcr', 'sentient_x'];
+
+export function useSelectedOrg() {
+  const [org, setOrg] = useState<Workspace>('biotech');
+
+  useEffect(() => {
+    const saved = localStorage.getItem('ea_selected_org') as Workspace | null;
+    if (saved && ALL_ORGS.includes(saved)) setOrg(saved);
+  }, []);
+
+  const selectOrg = (newOrg: Workspace) => {
+    setOrg(newOrg);
+    localStorage.setItem('ea_selected_org', newOrg);
+    // Dispatch custom event so other components can react
+    window.dispatchEvent(new CustomEvent('org-changed', { detail: newOrg }));
+  };
+
+  return [org, selectOrg] as const;
+}
 
 export function Sidebar() {
   const pathname = usePathname();
   const [isCollapsed, setIsCollapsed] = useState(false);
   const { unreadAlertCount } = useApp();
+  const [selectedOrg, setSelectedOrg] = useSelectedOrg();
 
   return (
     <aside
@@ -46,7 +71,49 @@ export function Sidebar() {
         </button>
       </div>
 
-      <nav className="mt-4 px-3 space-y-1 flex-1">
+      {/* Org Selector */}
+      {!isCollapsed ? (
+        <div className="px-3 mb-4">
+          <div className="flex items-center gap-2 mb-2 px-2">
+            <Building2 size={12} className="text-secondary" />
+            <span className="text-[10px] font-bold text-secondary uppercase tracking-wider">Organization</span>
+          </div>
+          <div className="space-y-1">
+            {ALL_ORGS.map(org => (
+              <button
+                key={org}
+                onClick={() => setSelectedOrg(org)}
+                className={`w-full text-left px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                  selectedOrg === org
+                    ? WORKSPACE_COLORS[org]
+                    : 'text-secondary hover:text-primary hover:bg-glass'
+                }`}
+              >
+                {WORKSPACE_LABELS[org]}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className="px-3 mb-4 flex flex-col items-center gap-1">
+          {ALL_ORGS.map(org => (
+            <button
+              key={org}
+              onClick={() => setSelectedOrg(org)}
+              className={`w-10 h-6 rounded text-[9px] font-bold transition-colors ${
+                selectedOrg === org
+                  ? WORKSPACE_COLORS[org]
+                  : 'text-secondary hover:text-primary hover:bg-glass'
+              }`}
+              title={WORKSPACE_LABELS[org]}
+            >
+              {org === 'biotech' ? 'Ex' : org === 'tcr' ? 'TC' : 'Se'}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <nav className="mt-2 px-3 space-y-1 flex-1">
         {navItems.map((item) => {
           const Icon = item.icon;
           const isActive = pathname === item.href;

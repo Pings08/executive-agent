@@ -1,4 +1,4 @@
-import { createAdminClient } from '@/lib/supabase/admin';
+import { getDb, newId, now, toJson, parseJson } from '@/lib/d1/client';
 import { generateEODDigest, generateEmployeeDailyNote } from '@/lib/ai/claude-client';
 
 // Status progression guard: only allow advancing forward, never downgrade.
@@ -24,7 +24,7 @@ export async function generateDailyDigests(date?: string): Promise<{
   tasksUpdated: number;
   errors: string[];
 }> {
-  const supabase = createAdminClient();
+  const db = getDb();
   const targetDate = date || new Date().toISOString().split('T')[0];
   const errors: string[] = [];
   let digestsCreated = 0;
@@ -32,116 +32,113 @@ export async function generateDailyDigests(date?: string): Promise<{
   let tasksUpdated = 0;
 
   // Fetch all active employees
-  const { data: employees, error: empError } = await supabase
-    .from('employees')
-    .select('id, name')
-    .eq('status', 'active');
+  const { results: employees } = await db
+    .prepare('SELECT id, name FROM employees WHERE status = ?')
+    .bind('active')
+    .all<{ id: string; name: string }>();
 
-  if (empError) {
+  if (!employees || employees.length === 0) {
     return {
       digestsCreated: 0,
       objectivesUpdated: 0,
       tasksUpdated: 0,
-      errors: [`Failed to fetch employees: ${empError.message}`],
+      errors: ['Failed to fetch employees or no active employees found'],
     };
   }
 
   // Fetch all non-completed objectives with their tasks + progress percentages
-  const { data: objectivesData } = await supabase
-    .from('objectives')
-    .select('id, title, description, status, progress_percentage, tasks(id, title, status, progress_percentage)')
-    .neq('status', 'completed');
+  const { results: objectivesRows } = await db
+    .prepare('SELECT id, title, description, status, progress_percentage FROM objectives WHERE status != ?')
+    .bind('completed')
+    .all<{ id: string; title: string; description: string | null; status: string; progress_percentage: number | null }>();
 
-  type ObjRow = {
+  const { results: tasksRows } = await db
+    .prepare(
+      `SELECT t.id, t.title, t.status, t.progress_percentage, t.objective_id
+       FROM tasks t
+       JOIN objectives o ON t.objective_id = o.id
+       WHERE o.status != ?`
+    )
+    .bind('completed')
+    .all<{ id: string; title: string; status: string; progress_percentage: number | null; objective_id: string }>();
+
+  // Group tasks by objective
+  const tasksByObjective = new Map<string, { id: string; title: string; status: string; progress_percentage: number }[]>();
+  for (const t of tasksRows || []) {
+    if (!tasksByObjective.has(t.objective_id)) {
+      tasksByObjective.set(t.objective_id, []);
+    }
+    tasksByObjective.get(t.objective_id)!.push({
+      id: t.id,
+      title: t.title,
+      status: t.status,
+      progress_percentage: t.progress_percentage ?? 0,
+    });
+  }
+
+  type ObjContext = {
     id: string;
     title: string;
-    description: string | null;
+    description: string;
     status: string;
-    progress_percentage: number | null;
-    tasks: { id: string; title: string; status: string; progress_percentage: number | null }[];
+    progress_percentage: number;
+    tasks: { id: string; title: string; status: string; progress_percentage: number }[];
   };
 
-  const objectivesContext = ((objectivesData || []) as ObjRow[]).map(o => ({
+  const objectivesContext: ObjContext[] = (objectivesRows || []).map(o => ({
     id: o.id,
     title: o.title,
     description: o.description || '',
     status: o.status,
     progress_percentage: o.progress_percentage ?? 0,
-    tasks: (o.tasks || []).map(t => ({
-      id: t.id,
-      title: t.title,
-      status: t.status,
-      progress_percentage: t.progress_percentage ?? 0,
-    })),
+    tasks: tasksByObjective.get(o.id) || [],
   }));
 
-  for (const employee of employees || []) {
+  for (const employee of employees) {
     try {
       // Fetch today's analyses joined with message + related objective/task
-      const { data: analyses, error: anlError } = await supabase
-        .from('message_analyses')
-        .select(`
-          id,
-          category,
-          sentiment,
-          productivity_score,
-          summary,
-          blocker_detected,
-          blocker_description,
-          related_objective_id,
-          raven_messages (
-            content,
-            created_at,
-            channel_name
-          ),
-          objectives (
-            title
-          ),
-          tasks (
-            title
-          )
-        `)
-        .eq('employee_id', employee.id)
-        .gte('created_at', `${targetDate}T00:00:00Z`)
-        .lte('created_at', `${targetDate}T23:59:59Z`)
-        .order('created_at', { ascending: true });
-
-      if (anlError) {
-        errors.push(`${employee.name}: DB error — ${anlError.message}`);
-        continue;
-      }
+      const { results: analyses } = await db
+        .prepare(
+          `SELECT ma.id, ma.category, ma.sentiment, ma.productivity_score, ma.summary,
+                  ma.blocker_detected, ma.blocker_description, ma.related_objective_id,
+                  rm.content AS message_content, rm.created_at AS message_created_at, rm.channel_name,
+                  o.title AS objective_title,
+                  t.title AS task_title
+           FROM message_analyses ma
+           LEFT JOIN raven_messages rm ON ma.raven_message_id = rm.id
+           LEFT JOIN objectives o ON ma.related_objective_id = o.id
+           LEFT JOIN tasks t ON ma.related_task_id = t.id
+           WHERE ma.employee_id = ?
+             AND ma.created_at >= ?
+             AND ma.created_at <= ?
+           ORDER BY ma.created_at ASC`
+        )
+        .bind(employee.id, `${targetDate}T00:00:00Z`, `${targetDate}T23:59:59Z`)
+        .all<{
+          id: string; category: string; sentiment: string; productivity_score: number | null;
+          summary: string | null; blocker_detected: number; blocker_description: string | null;
+          related_objective_id: string | null;
+          message_content: string | null; message_created_at: string | null; channel_name: string | null;
+          objective_title: string | null; task_title: string | null;
+        }>();
 
       if (!analyses || analyses.length === 0) continue; // silent today — no digest
 
-      type AnalysisRow = {
-        category: string;
-        sentiment: string;
-        productivity_score: number | null;
-        summary: string | null;
-        blocker_detected: boolean;
-        blocker_description: string | null;
-        raven_messages: { content: string; created_at: string; channel_name: string | null } | null;
-        objectives: { title: string } | null;
-        tasks: { title: string } | null;
-      };
-
-      const rows = analyses as unknown as AnalysisRow[];
-
-      const messages = rows.map(a => ({
-        content: a.raven_messages?.content || '',
-        timestamp: a.raven_messages?.created_at || targetDate,
-        channel: a.raven_messages?.channel_name || null,
+      const messages = analyses.map(a => ({
+        content: a.message_content || '',
+        timestamp: a.message_created_at || targetDate,
+        channel: a.channel_name || null,
       }));
 
-      const analysisContext = rows.map(a => ({
+      const analysisContext = analyses.map(a => ({
         summary: a.summary || '',
         category: a.category,
         sentiment: a.sentiment,
         productivityScore: a.productivity_score || 3,
-        blockerDetected: a.blocker_detected || false,
+        blockerDetected: a.blocker_detected === 1,
         blockerDescription: a.blocker_description || null,
-        relatedObjectiveTitle: a.objectives?.title || null,
-        relatedTaskTitle: a.tasks?.title || null,
+        relatedObjectiveTitle: a.objective_title || null,
+        relatedTaskTitle: a.task_title || null,
       }));
 
       const objectivesForPrompt = objectivesContext.map(o => ({
@@ -163,38 +160,56 @@ export async function generateDailyDigests(date?: string): Promise<{
       }));
 
       // Call Claude for EOD verdict (CEO-facing) and daily note (employee-facing) in sequence
-      // to stay under rate limits (12s delay built into process.ts batching)
+      // to stay under rate limits
       const [eodResult, dailyNoteResult] = await Promise.all([
         generateEODDigest(employee.name, messages, analysisContext, objectivesForPrompt),
         generateEmployeeDailyNote(employee.name, messages, analysisContext, objectivesForNotePrompt),
       ]);
 
       // Upsert EOD digest with all new fields
-      const { error: upsertError } = await supabase.from('daily_digests').upsert(
-        {
-          employee_id: employee.id,
-          digest_date: targetDate,
-          message_count: analyses.length,
-          avg_sentiment_score: eodResult.sentimentScore,
-          avg_productivity_score: eodResult.productivityScore,
-          overall_rating: eodResult.overallRating,
-          topics: eodResult.keyTopics,
-          summary: eodResult.summary,
-          blockers_count: eodResult.blockersCount,
-          daily_note: dailyNoteResult.narrativeNote,
-          objective_progress: dailyNoteResult.objectiveProgress,
-        },
-        { onConflict: 'employee_id,digest_date' }
-      );
-
-      if (upsertError) {
-        errors.push(`${employee.name}: Save failed — ${upsertError.message}`);
-      } else {
+      try {
+        await db
+          .prepare(
+            `INSERT INTO daily_digests (id, employee_id, digest_date, message_count,
+               avg_sentiment_score, avg_productivity_score, overall_rating, topics,
+               summary, blockers_count, daily_note, objective_progress, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(employee_id, digest_date) DO UPDATE SET
+               message_count = excluded.message_count,
+               avg_sentiment_score = excluded.avg_sentiment_score,
+               avg_productivity_score = excluded.avg_productivity_score,
+               overall_rating = excluded.overall_rating,
+               topics = excluded.topics,
+               summary = excluded.summary,
+               blockers_count = excluded.blockers_count,
+               daily_note = excluded.daily_note,
+               objective_progress = excluded.objective_progress,
+               updated_at = excluded.updated_at`
+          )
+          .bind(
+            newId(),
+            employee.id,
+            targetDate,
+            analyses.length,
+            eodResult.sentimentScore,
+            eodResult.productivityScore,
+            eodResult.overallRating,
+            toJson(eodResult.keyTopics),
+            eodResult.summary,
+            eodResult.blockersCount,
+            dailyNoteResult.narrativeNote,
+            toJson(dailyNoteResult.objectiveProgress),
+            now(),
+            now(),
+          )
+          .run();
         digestsCreated++;
+      } catch (err) {
+        errors.push(`${employee.name}: Save failed — ${err}`);
       }
 
       // --- Update objective and task progress from daily note analysis ---
-      const now = new Date().toISOString();
+      const timestamp = now();
 
       for (const progress of dailyNoteResult.objectiveProgress) {
         if (!progress.objectiveTitle) continue;
@@ -208,37 +223,41 @@ export async function generateDailyDigests(date?: string): Promise<{
 
         if (!matchedObj) continue;
 
-        // Build objective update payload
-        const objUpdate: Record<string, unknown> = {
-          last_activity_at: now,
-          updated_at: now,
-        };
+        // Build objective update
+        const updates: string[] = ['last_activity_at = ?', 'updated_at = ?'];
+        const binds: unknown[] = [timestamp, timestamp];
 
         // Update progress_percentage (additive, capped at 99 — humans confirm completion)
         const newPct = Math.min(99, matchedObj.progress_percentage + progress.estimatedProgressPct);
         if (newPct > matchedObj.progress_percentage) {
-          objUpdate.progress_percentage = newPct;
+          updates.push('progress_percentage = ?');
+          binds.push(newPct);
         }
 
         // Update ai_summary with latest evidence
         if (progress.evidenceSummary) {
-          objUpdate.ai_summary = progress.evidenceSummary;
+          updates.push('ai_summary = ?');
+          binds.push(progress.evidenceSummary);
         }
 
         // Update status only if it's a valid advance
         if (progress.suggestedStatus && canAdvanceStatus(matchedObj.status, progress.suggestedStatus)) {
-          objUpdate.status = progress.suggestedStatus;
+          updates.push('status = ?');
+          binds.push(progress.suggestedStatus);
           matchedObj.status = progress.suggestedStatus;
         }
 
-        const { error: objUpdateError } = await supabase
-          .from('objectives')
-          .update(objUpdate)
-          .eq('id', matchedObj.id);
+        binds.push(matchedObj.id);
 
-        if (!objUpdateError) {
+        try {
+          await db
+            .prepare(`UPDATE objectives SET ${updates.join(', ')} WHERE id = ?`)
+            .bind(...binds)
+            .run();
           matchedObj.progress_percentage = newPct;
           objectivesUpdated++;
+        } catch {
+          // silently skip failed objective update
         }
 
         // Update the specific task if identified
@@ -250,30 +269,36 @@ export async function generateDailyDigests(date?: string): Promise<{
           });
 
           if (matchedTask) {
-            const taskUpdate: Record<string, unknown> = { updated_at: now };
+            const taskUpdates: string[] = ['updated_at = ?'];
+            const taskBinds: unknown[] = [timestamp];
 
             // Advance task status: not_started → in_progress if work was done
             if (progress.suggestedStatus === 'blocked') {
-              taskUpdate.status = 'blocked';
+              taskUpdates.push('status = ?');
+              taskBinds.push('blocked');
             } else if (matchedTask.status === 'not_started' && progress.estimatedProgressPct > 0) {
-              taskUpdate.status = 'in_progress';
+              taskUpdates.push('status = ?');
+              taskBinds.push('in_progress');
             }
 
             // Update task progress percentage (additive, capped at 99)
             const newTaskPct = Math.min(99, matchedTask.progress_percentage + progress.estimatedProgressPct);
             if (newTaskPct > matchedTask.progress_percentage) {
-              taskUpdate.progress_percentage = newTaskPct;
+              taskUpdates.push('progress_percentage = ?');
+              taskBinds.push(newTaskPct);
             }
 
-            if (Object.keys(taskUpdate).length > 1) { // more than just updated_at
-              const { error: taskUpdateError } = await supabase
-                .from('tasks')
-                .update(taskUpdate)
-                .eq('id', matchedTask.id);
-
-              if (!taskUpdateError) {
+            if (taskUpdates.length > 1) { // more than just updated_at
+              taskBinds.push(matchedTask.id);
+              try {
+                await db
+                  .prepare(`UPDATE tasks SET ${taskUpdates.join(', ')} WHERE id = ?`)
+                  .bind(...taskBinds)
+                  .run();
                 matchedTask.progress_percentage = newTaskPct;
                 tasksUpdated++;
+              } catch {
+                // silently skip failed task update
               }
             }
           }
@@ -294,14 +319,15 @@ export async function generateDailyDigests(date?: string): Promise<{
         if (!matchedObj) continue;
         if (!canAdvanceStatus(matchedObj.status, progress.suggestedStatus)) continue;
 
-        const { error: updateError } = await supabase
-          .from('objectives')
-          .update({ status: progress.suggestedStatus, updated_at: now })
-          .eq('id', matchedObj.id);
-
-        if (!updateError) {
+        try {
+          await db
+            .prepare('UPDATE objectives SET status = ?, updated_at = ? WHERE id = ?')
+            .bind(progress.suggestedStatus, timestamp, matchedObj.id)
+            .run();
           matchedObj.status = progress.suggestedStatus;
           // only count if not already counted by daily note
+        } catch {
+          // silently skip
         }
       }
 
@@ -310,23 +336,31 @@ export async function generateDailyDigests(date?: string): Promise<{
         if (blocker.severity !== 'high') continue;
 
         // Avoid duplicate alerts (one per employee per day)
-        const { data: existing } = await supabase
-          .from('alerts')
-          .select('id')
-          .eq('employee_id', employee.id)
-          .eq('type', 'blocker_detected')
-          .eq('is_resolved', false)
-          .gte('created_at', `${targetDate}T00:00:00Z`)
-          .limit(1);
+        const existingAlert = await db
+          .prepare(
+            `SELECT id FROM alerts
+             WHERE employee_id = ? AND type = ? AND is_resolved = 0 AND created_at >= ?
+             LIMIT 1`
+          )
+          .bind(employee.id, 'blocker_detected', `${targetDate}T00:00:00Z`)
+          .first<{ id: string }>();
 
-        if (!existing || existing.length === 0) {
-          await supabase.from('alerts').insert({
-            type: 'blocker_detected',
-            severity: 'high',
-            title: `EOD Blocker — ${employee.name}`,
-            description: `${blocker.description}\n\nEvidence: "${blocker.messageExcerpt}"`,
-            employee_id: employee.id,
-          });
+        if (!existingAlert) {
+          await db
+            .prepare(
+              `INSERT INTO alerts (id, type, severity, title, description, employee_id, is_read, is_resolved, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)`
+            )
+            .bind(
+              newId(),
+              'blocker_detected',
+              'high',
+              `EOD Blocker — ${employee.name}`,
+              `${blocker.description}\n\nEvidence: "${blocker.messageExcerpt}"`,
+              employee.id,
+              now(),
+            )
+            .run();
         }
       }
     } catch (error: unknown) {

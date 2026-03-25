@@ -1,0 +1,8 @@
+name = "executive-agent"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "executive-agent-db"
+database_id = "bd8180c4-e63b-44df-ba6e-1cd6f081bad6"

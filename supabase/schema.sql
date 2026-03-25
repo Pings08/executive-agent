@@ -252,3 +252,64 @@ ALTER TABLE objectives
 ALTER TABLE tasks
   ADD COLUMN IF NOT EXISTS progress_percentage INTEGER DEFAULT 0
     CHECK (progress_percentage BETWEEN 0 AND 100);
+
+-- ========================================
+-- MIGRATION: Workspace categorization
+-- Run in Supabase SQL Editor
+-- ========================================
+ALTER TABLE employees
+  ADD COLUMN IF NOT EXISTS workspace TEXT
+    CHECK (workspace IN ('biotech', 'tcr', 'sentient_x'));
+
+-- ========================================
+-- MIGRATION: Company-Level Synthesis
+-- Run in Supabase SQL Editor
+-- ========================================
+
+CREATE TABLE IF NOT EXISTS company_snapshots (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  period_type TEXT NOT NULL CHECK (period_type IN ('day', 'week', 'month', 'year')),
+  period_start DATE NOT NULL,
+  period_end DATE NOT NULL,
+  narrative TEXT NOT NULL DEFAULT '',
+  key_themes TEXT[] DEFAULT '{}',
+  objectives_snapshot JSONB DEFAULT '[]',
+  blockers JSONB DEFAULT '[]',
+  highlights JSONB DEFAULT '[]',
+  message_count INTEGER DEFAULT 0,
+  active_employee_count INTEGER DEFAULT 0,
+  raw_ai_response JSONB,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(period_type, period_start)
+);
+
+CREATE INDEX IF NOT EXISTS idx_snapshots_period ON company_snapshots(period_type, period_start DESC);
+CREATE TRIGGER snapshots_updated BEFORE UPDATE ON company_snapshots FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE TABLE IF NOT EXISTS inferred_objectives (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  title TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  level TEXT NOT NULL DEFAULT 'operational' CHECK (level IN ('strategic', 'operational', 'tactical')),
+  parent_id UUID REFERENCES inferred_objectives(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'progressing', 'stalled', 'completed', 'abandoned')),
+  first_seen_at DATE NOT NULL,
+  last_seen_at DATE NOT NULL,
+  evidence_summary TEXT DEFAULT '',
+  confidence_score NUMERIC(3,2) DEFAULT 0.5 CHECK (confidence_score BETWEEN 0 AND 1),
+  source_snapshot_ids UUID[] DEFAULT '{}',
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_inferred_obj_status ON inferred_objectives(status);
+CREATE INDEX IF NOT EXISTS idx_inferred_obj_parent ON inferred_objectives(parent_id);
+CREATE INDEX IF NOT EXISTS idx_inferred_obj_last_seen ON inferred_objectives(last_seen_at DESC);
+CREATE TRIGGER inferred_objectives_updated BEFORE UPDATE ON inferred_objectives FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+ALTER TABLE company_snapshots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inferred_objectives ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "anon_read_company_snapshots" ON company_snapshots FOR SELECT USING (true);
+CREATE POLICY "anon_read_inferred_objectives" ON inferred_objectives FOR SELECT USING (true);
+ALTER PUBLICATION supabase_realtime ADD TABLE company_snapshots;

@@ -1,8 +1,8 @@
-import { SupabaseClient } from '@supabase/supabase-js';
 import { Status } from '@/types';
+import { newId, now } from '@/lib/d1/client';
 
 export async function createTask(
-  supabase: SupabaseClient,
+  db: D1Database,
   data: {
     objectiveId: string;
     parentTaskId?: string;
@@ -14,27 +14,36 @@ export async function createTask(
     endDate?: string;
   }
 ) {
-  const { data: task, error } = await supabase
-    .from('tasks')
-    .insert({
-      objective_id: data.objectiveId,
-      parent_task_id: data.parentTaskId || null,
-      title: data.title,
-      description: data.description,
-      status: data.status,
-      assignee_id: data.assigneeId || null,
-      start_date: data.startDate || null,
-      end_date: data.endDate || null,
-    })
-    .select()
-    .single();
+  const id = newId();
+  const timestamp = now();
 
-  if (error) throw error;
+  await db
+    .prepare(
+      `INSERT INTO tasks (id, objective_id, parent_task_id, title, description, status, assignee_id, start_date, end_date, progress_percentage, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`
+    )
+    .bind(
+      id,
+      data.objectiveId,
+      data.parentTaskId || null,
+      data.title,
+      data.description,
+      data.status,
+      data.assigneeId || null,
+      data.startDate || null,
+      data.endDate || null,
+      timestamp,
+      timestamp
+    )
+    .run();
+
+  // Fetch the created row since D1 has no RETURNING
+  const task = await db.prepare('SELECT * FROM tasks WHERE id = ?').bind(id).first();
   return task;
 }
 
 export async function updateTask(
-  supabase: SupabaseClient,
+  db: D1Database,
   id: string,
   updates: Partial<{
     title: string;
@@ -46,20 +55,29 @@ export async function updateTask(
     progressPercentage: number;
   }>
 ) {
-  const dbUpdates: Record<string, unknown> = {};
-  if (updates.title !== undefined) dbUpdates.title = updates.title;
-  if (updates.description !== undefined) dbUpdates.description = updates.description;
-  if (updates.status !== undefined) dbUpdates.status = updates.status;
-  if (updates.assigneeId !== undefined) dbUpdates.assignee_id = updates.assigneeId || null;
-  if (updates.startDate !== undefined) dbUpdates.start_date = updates.startDate || null;
-  if (updates.endDate !== undefined) dbUpdates.end_date = updates.endDate || null;
-  if (updates.progressPercentage !== undefined) dbUpdates.progress_percentage = updates.progressPercentage;
+  const setClauses: string[] = [];
+  const values: unknown[] = [];
 
-  const { error } = await supabase.from('tasks').update(dbUpdates).eq('id', id);
-  if (error) throw error;
+  if (updates.title !== undefined) { setClauses.push('title = ?'); values.push(updates.title); }
+  if (updates.description !== undefined) { setClauses.push('description = ?'); values.push(updates.description); }
+  if (updates.status !== undefined) { setClauses.push('status = ?'); values.push(updates.status); }
+  if (updates.assigneeId !== undefined) { setClauses.push('assignee_id = ?'); values.push(updates.assigneeId || null); }
+  if (updates.startDate !== undefined) { setClauses.push('start_date = ?'); values.push(updates.startDate || null); }
+  if (updates.endDate !== undefined) { setClauses.push('end_date = ?'); values.push(updates.endDate || null); }
+  if (updates.progressPercentage !== undefined) { setClauses.push('progress_percentage = ?'); values.push(updates.progressPercentage); }
+
+  if (setClauses.length === 0) return;
+
+  setClauses.push('updated_at = ?');
+  values.push(now());
+  values.push(id);
+
+  await db
+    .prepare(`UPDATE tasks SET ${setClauses.join(', ')} WHERE id = ?`)
+    .bind(...values)
+    .run();
 }
 
-export async function deleteTask(supabase: SupabaseClient, id: string) {
-  const { error } = await supabase.from('tasks').delete().eq('id', id);
-  if (error) throw error;
+export async function deleteTask(db: D1Database, id: string) {
+  await db.prepare('DELETE FROM tasks WHERE id = ?').bind(id).run();
 }
