@@ -3,9 +3,6 @@ pages_build_output_dir = ".open-next/assets"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
 
-# Main worker entry point (built by @opennextjs/cloudflare)
-main = ".open-next/worker.js"
-
 [[d1_databases]]
 binding = "DB"
 database_name = "executive-agent-db"
