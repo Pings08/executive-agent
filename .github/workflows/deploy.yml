@@ -22,8 +22,8 @@ jobs:
       - name: Install dependencies
         run: npm ci --legacy-peer-deps
 
-      - name: Build (Next.js + OpenNext)
-        run: npm run build
+      - name: Build for Cloudflare
+        run: npm run build:cloudflare
 
       - name: Apply D1 schema
         uses: cloudflare/wrangler-action@v3
