@@ -8,4 +8,4 @@ assets = { directory = ".open-next/assets", binding = "ASSETS" }
 [[d1_databases]]
 binding = "DB"
 database_name = "executive-agent-db"
-database_id = "bd8180c4-e63b-44df-ba6e-1cd6f081bad6"
+database_id = "1f428930-dfdb-41c9-910f-06afefdb66a2"
