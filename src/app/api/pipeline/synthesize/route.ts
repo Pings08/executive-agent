@@ -48,6 +48,9 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ success: false, error: 'period must be "day", "week", or "objectives"' }, { status: 400 });
   } catch (error: unknown) {
-    return NextResponse.json({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }, { status: 500 });
+    const message = error instanceof Error ? error.message : String(error);
+    const stack = error instanceof Error ? error.stack : undefined;
+    console.error('Synthesize error:', message, stack);
+    return NextResponse.json({ success: false, error: message, stack: stack?.split('\n').slice(0, 5) }, { status: 500 });
   }
 }

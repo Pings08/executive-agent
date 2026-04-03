@@ -15,7 +15,6 @@
     "pages:deploy": "wrangler pages deploy .next --project-name=executive-agent"
   },
   "dependencies": {
-    "@google/generative-ai": "^0.24.1",
     "@opennextjs/cloudflare": "^1.17.3",
     "date-fns": "^4.1.0",
     "lucide-react": "^0.577.0",

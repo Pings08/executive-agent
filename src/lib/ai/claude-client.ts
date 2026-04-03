@@ -1,8 +1,37 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import { buildAnalysisPrompt, buildDailySummaryPrompt, buildEODDigestPrompt, buildDailyNotePrompt, buildDaySynthesisPrompt, buildWeekRollupPrompt, buildObjectiveExtractionPrompt, buildMonthlySynthesisPrompt, buildEmployeeTrajectoryPrompt } from './prompts';
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
-const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
+/**
+ * Direct Gemini REST API client — replaces @google/generative-ai SDK
+ * which doesn't work in Cloudflare Workers runtime.
+ */
+const GEMINI_MODEL = 'gemini-2.0-flash';
+const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+
+async function generateContent(prompt: string): Promise<string> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error('GEMINI_API_KEY not set');
+
+  const res = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.7, maxOutputTokens: 8192 },
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Gemini API error ${res.status}: ${err}`);
+  }
+
+  const data = await res.json() as {
+    candidates?: { content?: { parts?: { text?: string }[] } }[];
+  };
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) throw new Error('No text in Gemini response');
+  return text;
+}
 
 export interface EmployeeContext {
   recentSummaries: { date: string; summary: string; productivityScore: number; category: string }[];
@@ -112,8 +141,7 @@ export async function analyzeMessage(
   const prompt = buildAnalysisPrompt(messageContent, senderName, channelName, objectives, recentContext, employeeContext);
 
   const text = await callWithRetry(async () => {
-    const result = await model.generateContent(prompt);
-    return result.response.text();
+    return await generateContent(prompt);
   });
 
   const result = parseJSON<AnalysisResult>(text);
@@ -139,8 +167,7 @@ export async function generateDailySummary(
   const prompt = buildDailySummaryPrompt(employeeName, messages, analyses);
 
   const text = await callWithRetry(async () => {
-    const result = await model.generateContent(prompt);
-    return result.response.text();
+    return await generateContent(prompt);
   });
 
   const result = parseJSON<DigestResult>(text);
@@ -177,8 +204,7 @@ export async function generateEmployeeDailyNote(
   const prompt = buildDailyNotePrompt(employeeName, messages, analyses, objectives);
 
   const text = await callWithRetry(async () => {
-    const result = await model.generateContent(prompt);
-    return result.response.text();
+    return await generateContent(prompt);
   });
 
   const result = parseJSON<DailyNoteResult>(text);
@@ -221,8 +247,7 @@ export async function generateEODDigest(
   const prompt = buildEODDigestPrompt(employeeName, messages, analyses, objectives);
 
   const text = await callWithRetry(async () => {
-    const result = await model.generateContent(prompt);
-    return result.response.text();
+    return await generateContent(prompt);
   });
 
   const result = parseJSON<EODDigestResult>(text);
@@ -329,8 +354,7 @@ export async function synthesizeCompanyDay(
 ): Promise<CompanySynthesisResult> {
   const prompt = buildDaySynthesisPrompt(date, messages, allEmployeeNames);
   const text = await callWithRetry(async () => {
-    const result = await model.generateContent(prompt);
-    return result.response.text();
+    return await generateContent(prompt);
   });
   const r = parseJSON<CompanySynthesisResult & { objectives_in_progress?: CompanySynthesisResult['objectives_snapshot'] }>(text);
   return {
@@ -354,8 +378,7 @@ export async function synthesizeCompanyWeek(
 ): Promise<CompanySynthesisResult> {
   const prompt = buildWeekRollupPrompt(weekStart, weekEnd, daySnapshots);
   const text = await callWithRetry(async () => {
-    const result = await model.generateContent(prompt);
-    return result.response.text();
+    return await generateContent(prompt);
   });
   const r = parseJSON<CompanySynthesisResult & { objectives_in_progress?: CompanySynthesisResult['objectives_snapshot'] }>(text);
   return {
@@ -378,8 +401,7 @@ export async function extractObjectiveHierarchy(
 ): Promise<ObjectiveHierarchyResult> {
   const prompt = buildObjectiveExtractionPrompt(snapshots, existingObjectives);
   const text = await callWithRetry(async () => {
-    const result = await model.generateContent(prompt);
-    return result.response.text();
+    return await generateContent(prompt);
   });
   const r = parseJSON<ObjectiveHierarchyResult>(text);
   return { objectives: Array.isArray(r.objectives) ? r.objectives : [] };
@@ -467,8 +489,7 @@ export async function synthesizeCompanyMonth(
 ): Promise<MonthlySynthesisResult> {
   const prompt = buildMonthlySynthesisPrompt(month, orgLabel, messages, allEmployeeNames);
   const text = await callWithRetry(async () => {
-    const result = await model.generateContent(prompt);
-    return result.response.text();
+    return await generateContent(prompt);
   });
   const r = parseJSON<MonthlySynthesisResult>(text);
   return {
@@ -545,8 +566,7 @@ export async function computeMonthlyTrajectories(
 ): Promise<EmployeeTrajectory[]> {
   const prompt = buildEmployeeTrajectoryPrompt(month, orgLabel, employees);
   const text = await callWithRetry(async () => {
-    const result = await model.generateContent(prompt);
-    return result.response.text();
+    return await generateContent(prompt);
   });
   const r = parseJSON<{ employees: EmployeeTrajectory[] }>(text);
   const trajectories = Array.isArray(r.employees) ? r.employees : [];
