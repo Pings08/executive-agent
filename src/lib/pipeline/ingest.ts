@@ -47,7 +47,7 @@ export async function ingestRavenMessages(): Promise<{
   for (const config of keyConfigs) {
     try {
       const raven = new RavenClient(config.key, config.secret);
-      const msgs = await raven.fetchMessages(lastCreation ?? undefined, 500);
+      const msgs = await raven.fetchMessages(lastCreation ?? undefined, 100);
       for (const msg of msgs) {
         const id = String(msg.name || '');
         if (id && !seenIds.has(id)) {
