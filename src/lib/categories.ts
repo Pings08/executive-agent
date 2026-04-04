@@ -56,16 +56,16 @@ export const BIOTECH_CATEGORIES: OrgCategory[] = [
 ];
 
 export const TCR_CATEGORIES: OrgCategory[] = [
-  { id: 'hardware', label: 'Hardware', color: 'text-blue-400', bgColor: 'bg-blue-500/10', borderColor: 'border-blue-500/30', keywords: ['hardware', 'pcb', 'mechanical', 'electrode', 'sensor', 'pogo'] },
-  { id: 'software', label: 'Software', color: 'text-violet-400', bgColor: 'bg-violet-500/10', borderColor: 'border-violet-500/30', keywords: ['software', 'firmware', 'app', 'api', 'platform', 'code'] },
-  { id: 'operations', label: 'Operations', color: 'text-amber-400', bgColor: 'bg-amber-500/10', borderColor: 'border-amber-500/30', keywords: ['operations', 'hr', 'onboarding', 'accounts', 'iso', 'qms'] },
-  { id: 'product', label: 'Product', color: 'text-emerald-400', bgColor: 'bg-emerald-500/10', borderColor: 'border-emerald-500/30', keywords: ['product', 'tempeq', 'pwomise', 'design', 'prototype'] },
+  { id: 'hardware', label: 'Hardware', color: 'text-blue-400', bgColor: 'bg-blue-500/10', borderColor: 'border-blue-500/30', keywords: ['hardware', 'pcb', 'mechanical', 'electrode', 'sensor', 'pogo', 'cartridge', 'comb', 'resin', 'immobilization', 'transfer method'] },
+  { id: 'software', label: 'Software', color: 'text-violet-400', bgColor: 'bg-violet-500/10', borderColor: 'border-violet-500/30', keywords: ['software', 'firmware', 'app', 'api', 'platform', 'code', 'test case', 'automation'] },
+  { id: 'operations', label: 'Operations', color: 'text-amber-400', bgColor: 'bg-amber-500/10', borderColor: 'border-amber-500/30', keywords: ['operations', 'hr', 'onboarding', 'accounts', 'iso', 'qms', 'training', 'documentation', 'compliance', 'audit'] },
+  { id: 'product', label: 'Product', color: 'text-emerald-400', bgColor: 'bg-emerald-500/10', borderColor: 'border-emerald-500/30', keywords: ['product', 'tempeq', 'pwomise', 'analyzer', 'design', 'prototype', 'elisa', 'electrochemical', 'immunoassay', 'optimize'] },
 ];
 
 export const SENTIENT_CATEGORIES: OrgCategory[] = [
-  { id: 'robotics', label: 'Robotics', color: 'text-blue-400', bgColor: 'bg-blue-500/10', borderColor: 'border-blue-500/30', keywords: ['robot', 'humanoid', 'arm', 'actuator', 'motor'] },
-  { id: 'platform', label: 'Platform', color: 'text-violet-400', bgColor: 'bg-violet-500/10', borderColor: 'border-violet-500/30', keywords: ['platform', 'software', 'pilot', 'pod', 'telus'] },
-  { id: 'research', label: 'Research', color: 'text-amber-400', bgColor: 'bg-amber-500/10', borderColor: 'border-amber-500/30', keywords: ['research', 'egocentric', 'vision', 'ai', 'model'] },
+  { id: 'robotics', label: 'Robotics', color: 'text-blue-400', bgColor: 'bg-blue-500/10', borderColor: 'border-blue-500/30', keywords: ['robot', 'humanoid', 'arm', 'actuator', 'motor', 'gripper', 'umi', 'servo', 'controller'] },
+  { id: 'platform', label: 'Platform', color: 'text-violet-400', bgColor: 'bg-violet-500/10', borderColor: 'border-violet-500/30', keywords: ['platform', 'software', 'pilot', 'pod', 'telus', 'app', 'interface'] },
+  { id: 'research', label: 'Research', color: 'text-amber-400', bgColor: 'bg-amber-500/10', borderColor: 'border-amber-500/30', keywords: ['research', 'egocentric', 'vision', 'ai', 'model', 'gene', 'cancer', 'therapeutic', 'aso', 'stability', 'drug', 'genome', 'maize', 'tomato', 'faecium', 'interaction'] },
 ];
 
 export const ORG_CATEGORIES: Record<string, OrgCategory[]> = {
