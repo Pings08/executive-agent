@@ -59,10 +59,13 @@ export default function CategoriesPage() {
 
   useEffect(() => { fetchData(selectedOrg); }, [fetchData, selectedOrg]);
   useEffect(() => {
-    const handler = () => fetchData(selectedOrg);
+    const handler = (e: Event) => {
+      const newOrg = (e as CustomEvent).detail as Workspace;
+      fetchData(newOrg);
+    };
     window.addEventListener('org-changed', handler);
     return () => window.removeEventListener('org-changed', handler);
-  }, [fetchData, selectedOrg]);
+  }, [fetchData]);
 
   const toggle = (id: string) => setExpanded(p => {
     const x = new Set(p); x.has(id) ? x.delete(id) : x.add(id); return x;
