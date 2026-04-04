@@ -6,7 +6,6 @@ import { usePathname } from 'next/navigation';
 import { useApp } from '@/store/AppContext';
 import {
   LayoutDashboard,
-  Target,
   MessageSquare,
   BarChart3,
   Settings,
@@ -15,13 +14,14 @@ import {
   Bell,
   Users,
   Building2,
+  Layers,
 } from 'lucide-react';
 import { WORKSPACE_LABELS, WORKSPACE_COLORS, type Workspace } from '@/types';
 
 const navItems = [
   { href: '/', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/messages', label: 'Messages', icon: MessageSquare },
-  { href: '/objectives', label: 'Objectives', icon: Target },
+  { href: '/categories', label: 'Categories', icon: Layers },
   { href: '/team', label: 'Team', icon: Users },
   { href: '/analytics', label: 'Analytics', icon: BarChart3 },
   { href: '/settings', label: 'Settings', icon: Settings },
@@ -40,7 +40,6 @@ export function useSelectedOrg() {
   const selectOrg = (newOrg: Workspace) => {
     setOrg(newOrg);
     localStorage.setItem('ea_selected_org', newOrg);
-    // Dispatch custom event so other components can react
     window.dispatchEvent(new CustomEvent('org-changed', { detail: newOrg }));
   };
 
