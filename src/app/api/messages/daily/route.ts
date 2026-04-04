@@ -4,6 +4,25 @@ import { getDb } from '@/lib/d1/client';
 const BASE = process.env.ERPNEXT_BASE_URL!;
 const AUTH = `token ${process.env.ERPNEXT_API_KEY}:${process.env.ERPNEXT_API_SECRET}`;
 
+/**
+ * Channel prefix → workspace mapping.
+ * This is the authoritative source — matches the synthesis pipeline.
+ */
+const CHANNEL_PREFIX_TO_WORKSPACE: Record<string, string> = {
+  'ExRNA-': 'ExRNA',
+  'VV Biotech-': 'VV Biotech',
+  'Technoculture-': 'Technoculture',
+  'Sentient-': 'Sentient',
+};
+
+function getWorkspaceFromChannel(channelId: string | null): string | null {
+  if (!channelId) return null;
+  for (const [prefix, ws] of Object.entries(CHANNEL_PREFIX_TO_WORKSPACE)) {
+    if (channelId.startsWith(prefix)) return ws;
+  }
+  return null;
+}
+
 export async function GET(req: NextRequest) {
   const date = req.nextUrl.searchParams.get('date');
   if (!date) return NextResponse.json({ error: 'date required' }, { status: 400 });
@@ -13,8 +32,8 @@ export async function GET(req: NextRequest) {
     const dayStart = `${date} 00:00:00`;
     const dayEnd = `${date} 23:59:59`;
 
-    // Fetch messages with employee name via JOIN, ERPNext channel/workspace data in parallel
-    const [messagesResult, channelsRes, wsMembersRes, employeesResult] = await Promise.all([
+    // Fetch messages with employee join + ERPNext channel data for unmapped channels
+    const [messagesResult, channelsRes] = await Promise.all([
       db
         .prepare(
           `SELECT rm.id, rm.content, rm.sender, rm.channel_id, rm.channel_name, rm.created_at, rm.employee_id,
@@ -32,38 +51,18 @@ export async function GET(req: NextRequest) {
         }>(),
       fetch(`${BASE}/api/resource/Raven%20Channel?fields=${encodeURIComponent('["name","channel_name","workspace"]')}&limit_page_length=500`, {
         headers: { Authorization: AUTH },
-      }).then(r => r.json()).then(d => d.data || []),
-      fetch(`${BASE}/api/resource/Raven%20Workspace%20Member?fields=${encodeURIComponent('["user","workspace"]')}&limit_page_length=1000`, {
-        headers: { Authorization: AUTH },
-      }).then(r => r.json()).then(d => d.data || []),
-      db
-        .prepare("SELECT id, name, email, raven_user FROM employees WHERE status = 'active'")
-        .all<{ id: string; name: string; email: string | null; raven_user: string | null }>(),
+      }).then(r => r.json()).then(d => d.data || []).catch(() => []),
     ]);
 
     const messages = messagesResult.results || [];
-    const empList = employeesResult.results || [];
 
-    // Channel ID -> workspace name
-    const channelWorkspace = new Map<string, string>();
+    // Build ERPNext channel → workspace map as fallback
+    const erpChannelWorkspace = new Map<string, string>();
     for (const ch of channelsRes) {
-      if (ch.workspace) channelWorkspace.set(ch.name, ch.workspace);
+      if (ch.workspace) erpChannelWorkspace.set(ch.name, ch.workspace);
     }
 
-    // User email -> primary workspace (from workspace membership)
-    const userWorkspaceMap = new Map<string, string>();
-    for (const m of wsMembersRes) {
-      if (!userWorkspaceMap.has(m.user)) userWorkspaceMap.set(m.user, m.workspace);
-    }
-
-    // Employee ID -> email for workspace fallback
-    const empEmailMap = new Map<string, string>();
-    for (const e of empList) {
-      empEmailMap.set(e.id, e.email || e.raven_user || '');
-    }
-
-    // Resolve workspace for each message
-    type MsgRow = typeof messages[number];
+    // Group messages by workspace
     type GroupedMember = {
       id: string | null;
       name: string;
@@ -77,19 +76,17 @@ export async function GET(req: NextRequest) {
 
     const wsGroups = new Map<string, WorkspaceGroup>();
 
-    for (const msg of messages as MsgRow[]) {
-      // 1. Try channel -> workspace
-      let ws = msg.channel_id ? channelWorkspace.get(msg.channel_id) : null;
-      // 2. Fallback: sender's primary workspace from membership
-      if (!ws) {
-        ws = userWorkspaceMap.get(msg.sender) || null;
+    for (const msg of messages) {
+      // 1. Primary: channel_id prefix (authoritative, matches synthesis pipeline)
+      let ws = getWorkspaceFromChannel(msg.channel_id);
+
+      // 2. Fallback: ERPNext channel → workspace mapping
+      if (!ws && msg.channel_id) {
+        ws = erpChannelWorkspace.get(msg.channel_id) || null;
       }
-      // 3. Fallback by employee email
-      if (!ws && msg.employee_id) {
-        const email = empEmailMap.get(msg.employee_id);
-        if (email) ws = userWorkspaceMap.get(email) || null;
-      }
-      if (!ws) ws = 'Other';
+
+      // 3. Skip messages that don't belong to any known workspace (DMs, etc.)
+      if (!ws) continue;
 
       if (!wsGroups.has(ws)) {
         wsGroups.set(ws, { name: ws, members: new Map(), messageCount: 0 });
@@ -106,12 +103,12 @@ export async function GET(req: NextRequest) {
       group.members.get(empId)!.messages.push({
         id: msg.id,
         content: msg.content,
-        channel: msg.channel_name,
+        channel: msg.channel_name || msg.channel_id,
         time: msg.created_at,
       });
     }
 
-    // Convert to serializable array, sorted by message count desc
+    // Convert to array, sorted by message count
     const workspaces = [...wsGroups.values()]
       .map(g => ({
         name: g.name,
@@ -119,10 +116,10 @@ export async function GET(req: NextRequest) {
         memberCount: g.members.size,
         members: [...g.members.values()].sort((a, b) => b.messages.length - a.messages.length),
       }))
-      .filter(g => g.name !== 'Other' || g.messageCount > 0)
       .sort((a, b) => b.messageCount - a.messageCount);
 
-    return NextResponse.json({ date, workspaces, totalMessages: messages.length });
+    const totalMessages = workspaces.reduce((s, w) => s + w.messageCount, 0);
+    return NextResponse.json({ date, workspaces, totalMessages });
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
