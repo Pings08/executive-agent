@@ -56,16 +56,73 @@ export const BIOTECH_CATEGORIES: OrgCategory[] = [
 ];
 
 export const TCR_CATEGORIES: OrgCategory[] = [
-  { id: 'hardware', label: 'Hardware', color: 'text-blue-400', bgColor: 'bg-blue-500/10', borderColor: 'border-blue-500/30', keywords: ['hardware', 'pcb', 'mechanical', 'electrode', 'sensor', 'pogo', 'cartridge', 'comb', 'resin', 'immobilization', 'transfer method'] },
-  { id: 'software', label: 'Software', color: 'text-violet-400', bgColor: 'bg-violet-500/10', borderColor: 'border-violet-500/30', keywords: ['software', 'firmware', 'app', 'api', 'platform', 'code', 'test case', 'automation'] },
-  { id: 'operations', label: 'Operations', color: 'text-amber-400', bgColor: 'bg-amber-500/10', borderColor: 'border-amber-500/30', keywords: ['operations', 'hr', 'onboarding', 'accounts', 'iso', 'qms', 'training', 'documentation', 'compliance', 'audit'] },
-  { id: 'product', label: 'Product', color: 'text-emerald-400', bgColor: 'bg-emerald-500/10', borderColor: 'border-emerald-500/30', keywords: ['product', 'tempeq', 'pwomise', 'analyzer', 'design', 'prototype', 'elisa', 'electrochemical', 'immunoassay', 'optimize'] },
+  {
+    id: 'assay_development',
+    label: 'Assay Development',
+    color: 'text-emerald-400',
+    bgColor: 'bg-emerald-500/10',
+    borderColor: 'border-emerald-500/30',
+    keywords: ['assay', 'elisa', 'electrochemical', 'sflt1', 'plgf', 'nipt', 'ec-array', 'immunoassay', 'antibody', 'bead', 'papp-a', 'sensing', 'half antibody', 'experiment', 'optimization', 'electrode', 'cartridge', 'resin', 'ecsm'],
+  },
+  {
+    id: 'instrument_development',
+    label: 'Instrument Development',
+    color: 'text-blue-400',
+    bgColor: 'bg-blue-500/10',
+    borderColor: 'border-blue-500/30',
+    keywords: ['instrument', 'pwomise', 'analyzer', 'mechanical', 'pcb', 'hardware', 'kingfisher', 'wearable', 'device', 'test case', 'verification', 'validation', 'design'],
+  },
+  {
+    id: 'regulatory',
+    label: 'Regulatory',
+    color: 'text-amber-400',
+    bgColor: 'bg-amber-500/10',
+    borderColor: 'border-amber-500/30',
+    keywords: ['regulatory', 'iso', 'qms', 'quality', 'compliance', 'factory', 'construction', 'documentation', 'audit', '13485', 'supplier control', 'purchasing'],
+  },
+  {
+    id: 'core_science',
+    label: 'Core Science Development',
+    color: 'text-violet-400',
+    bgColor: 'bg-violet-500/10',
+    borderColor: 'border-violet-500/30',
+    keywords: ['dna', 'protein', 'docking', 'science', 'research', 'protocol', 'method', 'immobilization', 'transfer', 'raw data', 'erp'],
+  },
 ];
 
 export const SENTIENT_CATEGORIES: OrgCategory[] = [
-  { id: 'robotics', label: 'Robotics', color: 'text-blue-400', bgColor: 'bg-blue-500/10', borderColor: 'border-blue-500/30', keywords: ['robot', 'humanoid', 'arm', 'actuator', 'motor', 'gripper', 'umi', 'servo', 'controller'] },
-  { id: 'platform', label: 'Platform', color: 'text-violet-400', bgColor: 'bg-violet-500/10', borderColor: 'border-violet-500/30', keywords: ['platform', 'software', 'pilot', 'pod', 'telus', 'app', 'interface'] },
-  { id: 'research', label: 'Research', color: 'text-amber-400', bgColor: 'bg-amber-500/10', borderColor: 'border-amber-500/30', keywords: ['research', 'egocentric', 'vision', 'ai', 'model', 'gene', 'cancer', 'therapeutic', 'aso', 'stability', 'drug', 'genome', 'maize', 'tomato', 'faecium', 'interaction'] },
+  {
+    id: 'humanoid',
+    label: 'Humanoid',
+    color: 'text-blue-400',
+    bgColor: 'bg-blue-500/10',
+    borderColor: 'border-blue-500/30',
+    keywords: ['humanoid', 'pilot pod', 'mecka', 'telus', 'upbringing', 'ravivar', 'sentient-1', 'encoder', 'delay', 'bottleneck'],
+  },
+  {
+    id: 'gripper_umi',
+    label: 'Gripper / UMI',
+    color: 'text-emerald-400',
+    bgColor: 'bg-emerald-500/10',
+    borderColor: 'border-emerald-500/30',
+    keywords: ['gripper', 'umi', 'arm', 'component', 'pcb', 'flexitac', 'opencrane', 'procurement'],
+  },
+  {
+    id: 'ai_training',
+    label: 'AI Training',
+    color: 'text-violet-400',
+    bgColor: 'bg-violet-500/10',
+    borderColor: 'border-violet-500/30',
+    keywords: ['vla', 'training', 'wam', 'model', 'elephant', 'claude', 'codex', 'analyzer', 'egocentric', 'vision'],
+  },
+  {
+    id: 'platform',
+    label: 'Platform',
+    color: 'text-amber-400',
+    bgColor: 'bg-amber-500/10',
+    borderColor: 'border-amber-500/30',
+    keywords: ['platform', 'sxd', 'data', 'yor', 'software', 'pipeline', 'testing', 'plan'],
+  },
 ];
 
 export const ORG_CATEGORIES: Record<string, OrgCategory[]> = {
