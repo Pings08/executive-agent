@@ -10,8 +10,8 @@ export async function GET(req: NextRequest) {
 
   try {
     const db = getDb();
-    const dayStart = `${date}T00:00:00`;
-    const dayEnd = `${date}T23:59:59`;
+    const dayStart = `${date} 00:00:00`;
+    const dayEnd = `${date} 23:59:59`;
 
     // Fetch messages with employee name via JOIN, ERPNext channel/workspace data in parallel
     const [messagesResult, channelsRes, wsMembersRes, employeesResult] = await Promise.all([

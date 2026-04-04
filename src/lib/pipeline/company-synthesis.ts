@@ -112,8 +112,8 @@ export async function synthesizeDay(date: string, org: Org): Promise<{
     return { snapshotId: stateKey, messageCount: (existing.message_count as number) || 0, employeeCount: (existing.active_employee_count as number) || 0, skipped: true, error: null };
   }
 
-  const dayStart = `${date}T00:00:00.000Z`;
-  const dayEnd = `${date}T23:59:59.999Z`;
+  const dayStart = `${date} 00:00:00`;
+  const dayEnd = `${date} 23:59:59`;
 
   // Fetch messages for this org by channel_id prefix — active employees only
   const prefixes = ORG_CHANNEL_PREFIXES[org];
@@ -480,9 +480,9 @@ export async function synthesizeMonth(month: string, org: Org): Promise<{
   }
 
   // Fetch ALL messages for this org for the entire month
-  const monthStart = `${month}-01T00:00:00.000Z`;
+  const monthStart = `${month}-01 00:00:00`;
   const lastDay = new Date(parseInt(month.slice(0, 4)), parseInt(month.slice(5, 7)), 0).getDate();
-  const monthEnd = `${month}-${String(lastDay).padStart(2, '0')}T23:59:59.999Z`;
+  const monthEnd = `${month}-${String(lastDay).padStart(2, '0')} 23:59:59`;
 
   const empIdArr = [...orgEmpIds];
   const empPlaceholders = placeholders(empIdArr.length);
@@ -596,9 +596,9 @@ export async function computeTrajectories(month: string, org: Org): Promise<{
     return { success: false, employeeCount: 0, error: `No employees for ${org}` };
   }
 
-  const monthStart = `${month}-01T00:00:00.000Z`;
+  const monthStart = `${month}-01 00:00:00`;
   const lastDay = new Date(parseInt(month.slice(0, 4)), parseInt(month.slice(5, 7)), 0).getDate();
-  const monthEnd = `${month}-${String(lastDay).padStart(2, '0')}T23:59:59.999Z`;
+  const monthEnd = `${month}-${String(lastDay).padStart(2, '0')} 23:59:59`;
 
   const empIdArr = [...orgEmpIds];
   const empPlaceholders = placeholders(empIdArr.length);
