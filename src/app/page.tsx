@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import Link from 'next/link';
 import { format, parseISO } from 'date-fns';
+import { ORG_CATEGORIES, groupByCategory } from '@/lib/categories';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -479,158 +480,113 @@ export default function Dashboard() {
             )}
           </section>
 
-          {/* Two-column layout */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-            {/* Inferred Objectives Tree */}
-            <section className="space-y-4">
-              <div className="flex justify-between items-center">
-                <h2 className="text-lg font-bold flex items-center gap-2">
-                  <Target className="text-accent" size={18} />
-                  Inferred Objectives
-                </h2>
-                <span className="text-[10px] text-secondary">
-                  {objectives.filter(o => o.status === 'active' || o.status === 'progressing').length} active
-                </span>
-              </div>
-
-              {rootObjectives.length === 0 ? (
-                <div className="card text-center py-8 text-secondary text-xs italic">
-                  No objectives extracted yet. Run &quot;Extract Objectives&quot; from Settings after backfilling some days.
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {rootObjectives.map(obj => {
-                    const children = childMap.get(obj.id) || [];
-                    const isExpanded = expandedObjective.has(obj.id);
-                    return (
-                      <div key={obj.id} className="card !p-3">
-                        <div
-                          className="flex items-start gap-2 cursor-pointer"
-                          onClick={() => children.length > 0 && toggleExpand(obj.id)}
-                        >
-                          {children.length > 0 ? (
-                            isExpanded ? <ChevronDown size={14} className="mt-0.5 text-secondary shrink-0" /> : <ChevronRight size={14} className="mt-0.5 text-secondary shrink-0" />
-                          ) : (
-                            <div className="w-3.5 shrink-0" />
-                          )}
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 mb-1">
-                              <span className={`w-2 h-2 rounded-full shrink-0 ${statusDots[obj.status] || 'bg-gray-400'}`} />
-                              <span className="text-sm font-bold truncate">{obj.title}</span>
-                            </div>
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${levelColors[obj.level]}`}>
-                                {obj.level}
-                              </span>
-                              <span className={`text-[10px] font-bold ${statusColors[obj.status] || 'text-gray-400'}`}>
-                                {obj.status}
-                              </span>
-                              <span className="text-[10px] text-secondary">
-                                {Math.round(obj.confidence_score * 100)}% confidence
-                              </span>
-                            </div>
-                            {obj.description && (
-                              <p className="text-[10px] text-secondary/70 mt-1 line-clamp-2">{obj.description}</p>
-                            )}
-                          </div>
-                        </div>
-
-                        {isExpanded && children.length > 0 && (
-                          <div className="ml-6 mt-2 space-y-2 border-l border-border pl-3">
-                            {children.map(child => {
-                              const grandchildren = childMap.get(child.id) || [];
-                              const childExpanded = expandedObjective.has(child.id);
-                              return (
-                                <div key={child.id}>
-                                  <div
-                                    className="flex items-start gap-2 cursor-pointer"
-                                    onClick={() => grandchildren.length > 0 && toggleExpand(child.id)}
-                                  >
-                                    {grandchildren.length > 0 ? (
-                                      childExpanded ? <ChevronDown size={12} className="mt-0.5 text-secondary shrink-0" /> : <ChevronRight size={12} className="mt-0.5 text-secondary shrink-0" />
-                                    ) : (
-                                      <div className="w-3 shrink-0" />
-                                    )}
-                                    <div className="flex-1 min-w-0">
-                                      <div className="flex items-center gap-2">
-                                        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${statusDots[child.status] || 'bg-gray-400'}`} />
-                                        <span className="text-xs font-bold truncate">{child.title}</span>
-                                      </div>
-                                      <div className="flex items-center gap-2 mt-0.5">
-                                        <span className={`text-[9px] font-bold px-1 py-px rounded border ${levelColors[child.level]}`}>
-                                          {child.level}
-                                        </span>
-                                        <span className={`text-[9px] ${statusColors[child.status]}`}>{child.status}</span>
-                                      </div>
-                                    </div>
-                                  </div>
-
-                                  {childExpanded && grandchildren.length > 0 && (
-                                    <div className="ml-5 mt-1 space-y-1 border-l border-border/50 pl-2">
-                                      {grandchildren.map(gc => (
-                                        <div key={gc.id} className="flex items-center gap-2">
-                                          <span className={`w-1 h-1 rounded-full shrink-0 ${statusDots[gc.status] || 'bg-gray-400'}`} />
-                                          <span className="text-[10px] truncate">{gc.title}</span>
-                                          <span className={`text-[9px] ${statusColors[gc.status]}`}>{gc.status}</span>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </section>
-
-            {/* Recent Day Snapshots Timeline */}
-            <section className="space-y-4">
+          {/* Objectives by Category */}
+          <section className="space-y-4">
+            <div className="flex justify-between items-center">
               <h2 className="text-lg font-bold flex items-center gap-2">
-                <Clock className="text-accent" size={18} />
-                Recent Activity
+                <Target className="text-accent" size={18} />
+                Objectives by Category
               </h2>
+              <span className="text-[10px] text-secondary">
+                {objectives.length} total · {objectives.filter(o => o.status === 'active' || o.status === 'progressing').length} active
+              </span>
+            </div>
 
-              {recentDays.length === 0 ? (
-                <div className="card text-center py-8 text-secondary text-xs italic">
-                  No day snapshots yet. Run &quot;Backfill Days&quot; from Settings.
-                </div>
-              ) : (
+            {objectives.length === 0 ? (
+              <div className="card text-center py-8 text-secondary text-xs italic">
+                No objectives extracted yet. Run synthesis from Settings.
+              </div>
+            ) : (() => {
+              const categories = ORG_CATEGORIES[selectedOrg] || [];
+              const grouped = groupByCategory(objectives, categories);
+
+              return (
                 <div className="space-y-3">
-                  {recentDays.map((day, idx) => (
-                    <div key={idx} className="card !p-4">
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-xs font-bold">
-                          {format(parseISO(day.period_start), 'EEE, MMM d')}
-                        </span>
-                        <div className="flex items-center gap-2 text-[10px] text-secondary">
-                          <span>{day.message_count} msgs</span>
-                          <span>·</span>
-                          <span>{day.active_employee_count} people</span>
+                  {[...grouped.entries()]
+                    .filter(([, g]) => g.objectives.length > 0)
+                    .map(([catId, { category: cat, objectives: catObjs }]) => (
+                    <div key={catId} className={`rounded-xl border ${cat.borderColor} overflow-hidden`}>
+                      {/* Category header */}
+                      <button
+                        onClick={() => toggleExpand(catId)}
+                        className={`w-full flex items-center justify-between px-5 py-3 ${cat.bgColor} hover:brightness-110 transition-all`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <ChevronDown
+                            size={16}
+                            className={`${cat.color} transition-transform ${expandedObjective.has(catId) ? '' : '-rotate-90'}`}
+                          />
+                          <span className={`text-sm font-bold ${cat.color}`}>{cat.label}</span>
                         </div>
-                      </div>
-                      <p className="text-xs text-secondary/80 line-clamp-3 leading-relaxed">
-                        {day.narrative}
-                      </p>
-                      {day.key_themes?.length > 0 && (
-                        <div className="flex flex-wrap gap-1 mt-2">
-                          {day.key_themes.slice(0, 4).map((t, i) => (
-                            <span key={i} className="text-[9px] bg-glass text-secondary px-1.5 py-0.5 rounded">
-                              {t}
-                            </span>
-                          ))}
+                        <div className="flex items-center gap-3">
+                          {/* Mini status bar */}
+                          <div className="flex gap-0.5">
+                            {catObjs.map((o, i) => (
+                              <div
+                                key={i}
+                                className={`w-2.5 h-2.5 rounded-sm ${statusDots[(o as InferredObjective).status] || 'bg-gray-400'}`}
+                                title={`${o.title} (${o.status})`}
+                              />
+                            ))}
+                          </div>
+                          <span className="text-[11px] text-secondary">{catObjs.length}</span>
+                        </div>
+                      </button>
+
+                      {/* Objectives in this category */}
+                      {expandedObjective.has(catId) && (
+                        <div className="divide-y divide-border/30">
+                          {catObjs.map((obj, i) => {
+                            const o = obj;
+                            return (
+                              <div key={i} className="px-5 py-3">
+                                <div className="flex items-center gap-2 mb-1">
+                                  <span className={`w-2 h-2 rounded-full shrink-0 ${statusDots[o.status] || 'bg-gray-400'}`} />
+                                  <span className="text-sm font-medium">{o.title}</span>
+                                  <span className={`text-[9px] px-1 py-px rounded border ${levelColors[o.level] || ''}`}>{o.level}</span>
+                                  <span className={`text-[9px] font-bold ${statusColors[o.status] || 'text-gray-400'}`}>{o.status}</span>
+                                </div>
+                                {o.description && (
+                                  <p className="text-[10px] text-secondary/70 ml-4 line-clamp-2">{o.description}</p>
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
                       )}
                     </div>
                   ))}
                 </div>
-              )}
+              );
+            })()}
+          </section>
+
+          {/* Recent Activity Timeline */}
+          {recentDays.length > 0 && (
+            <section className="space-y-4">
+              <h2 className="text-lg font-bold flex items-center gap-2">
+                <Clock className="text-accent" size={18} />
+                Recent Activity
+              </h2>
+              <div className="space-y-3">
+                {recentDays.map((day, idx) => (
+                  <div key={idx} className="card !p-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-bold">
+                        {format(parseISO(day.period_start), 'EEE, MMM d')}
+                      </span>
+                      <div className="flex items-center gap-2 text-[10px] text-secondary">
+                        <span>{day.message_count} msgs</span>
+                        <span>·</span>
+                        <span>{day.active_employee_count} people</span>
+                      </div>
+                    </div>
+                    <p className="text-xs text-secondary/80 line-clamp-3 leading-relaxed">{day.narrative}</p>
+                  </div>
+                ))}
+              </div>
             </section>
-          </div>
+          )}
         </>
       )}
     </div>
