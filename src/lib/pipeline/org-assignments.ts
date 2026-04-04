@@ -1,13 +1,12 @@
 import { getDb, now, toJson } from '@/lib/d1/client';
 
 /**
- * Auto-assign employees to orgs based on WHERE THEY ACTUALLY POST MESSAGES
- * in Raven — not workspace membership (which is too broad).
+ * Assign employees to orgs using ERPNext workspace membership + email domain.
  *
- * Logic:
- *   1. Fetch channel → workspace mapping from Raven
- *   2. Count each employee's messages per workspace (from raven_messages in D1)
- *   3. Assign to the workspace where they post MOST messages
+ * Priority:
+ *   1. Email domain: @exrna.com → biotech, @technoculture.io → tcr
+ *   2. ERPNext workspace membership (primary workspace)
+ *   3. Fallback: message activity patterns
  *
  * Workspace → Org mapping:
  *   ExRNA / VV Biotech → biotech
@@ -28,6 +27,11 @@ const WORKSPACE_TO_ORG: Record<string, Org> = {
   'Sentient': 'sentient_x',
 };
 
+const DOMAIN_TO_ORG: Record<string, Org> = {
+  'exrna.com': 'biotech',
+  'technoculture.io': 'tcr',
+};
+
 async function fetchRaven<T>(
   doctype: string, fields: string[], filters?: unknown[][], limit = 500,
 ): Promise<T[]> {
@@ -41,6 +45,49 @@ async function fetchRaven<T>(
   return data.data || [];
 }
 
+function getOrgByEmail(email: string | null): Org | null {
+  if (!email) return null;
+  const domain = email.split('@')[1]?.toLowerCase();
+  return domain ? DOMAIN_TO_ORG[domain] || null : null;
+}
+
+function getPrimaryOrg(email: string | null, workspaces: string[]): Org | null {
+  // 1. Email domain takes priority
+  const domainOrg = getOrgByEmail(email);
+  if (domainOrg) return domainOrg;
+
+  // 2. Workspace membership
+  const wsSet = new Set(workspaces);
+
+  // If only in biotech workspaces
+  if (wsSet.size > 0 && [...wsSet].every(w => w === 'ExRNA' || w === 'VV Biotech')) {
+    return 'biotech';
+  }
+
+  // If only in Technoculture (not in ExRNA/VVB)
+  if (wsSet.has('Technoculture') && !wsSet.has('ExRNA') && !wsSet.has('VV Biotech') && !wsSet.has('Sentient')) {
+    return 'tcr';
+  }
+
+  // If only in Sentient
+  if (wsSet.has('Sentient') && !wsSet.has('Technoculture') && !wsSet.has('ExRNA') && !wsSet.has('VV Biotech')) {
+    return 'sentient_x';
+  }
+
+  // In multiple orgs — determine by non-biotech membership
+  // (since ExRNA/VVB are the most common, check for TCR/Sentient specifically)
+  if (wsSet.has('Sentient') && !wsSet.has('Technoculture')) return 'sentient_x';
+  if (wsSet.has('Technoculture') && !wsSet.has('Sentient')) return 'tcr';
+
+  // In both TCR and Sentient — default to TCR
+  if (wsSet.has('Technoculture')) return 'tcr';
+
+  // Fallback
+  if (wsSet.has('ExRNA') || wsSet.has('VV Biotech')) return 'biotech';
+
+  return null;
+}
+
 export async function fetchAndAssignOrgs(): Promise<{
   total: number;
   assigned: Record<Org, number>;
@@ -48,21 +95,20 @@ export async function fetchAndAssignOrgs(): Promise<{
 }> {
   const db = getDb();
 
-  // 1. Fetch channel → workspace mapping from Raven
-  const channels = await fetchRaven<{ name: string; workspace: string | null }>(
-    'Raven Channel', ['name', 'workspace'], undefined, 500,
+  // 1. Fetch workspace memberships from ERPNext
+  const wsMemberships = await fetchRaven<{ user: string; workspace: string }>(
+    'Raven Workspace Member', ['user', 'workspace'], undefined, 1000,
   );
 
-  // Build channel_id → org lookup
-  const channelOrg = new Map<string, Org>();
-  for (const ch of channels) {
-    if (ch.workspace) {
-      const org = WORKSPACE_TO_ORG[ch.workspace];
-      if (org) channelOrg.set(ch.name, org);
-    }
+  // Build user → workspaces map
+  const userWorkspaces = new Map<string, string[]>();
+  for (const m of wsMemberships) {
+    if (m.user === 'Administrator') continue;
+    if (!userWorkspaces.has(m.user)) userWorkspaces.set(m.user, []);
+    userWorkspaces.get(m.user)!.push(m.workspace);
   }
 
-  // 2. Fetch all active employees
+  // 2. Fetch all active employees from D1
   const { results: empList } = await db
     .prepare('SELECT id, name, email, raven_user FROM employees WHERE status = ?')
     .bind('active')
@@ -72,44 +118,21 @@ export async function fetchAndAssignOrgs(): Promise<{
     return { total: 0, assigned: { biotech: 0, tcr: 0, sentient_x: 0 }, unassigned: [] };
   }
 
-  // 3. For each employee, count messages per org by looking at channel_id
+  // 3. Assign each employee to an org
   const assignments: Record<string, Org> = {};
   const counters: Record<Org, number> = { biotech: 0, tcr: 0, sentient_x: 0 };
   const unassigned: string[] = [];
 
   for (const emp of empList) {
-    // Fetch this employee's messages with channel_id
-    const { results: msgs } = await db
-      .prepare(
-        `SELECT channel_id FROM raven_messages
-         WHERE employee_id = ? AND channel_id IS NOT NULL
-         LIMIT 500`
-      )
-      .bind(emp.id)
-      .all<{ channel_id: string }>();
+    const ravenEmail = emp.raven_user || emp.email;
+    const workspaces = userWorkspaces.get(ravenEmail || '') || [];
 
-    if (!msgs || msgs.length === 0) {
-      unassigned.push(emp.name);
-      continue;
-    }
+    const org = getPrimaryOrg(ravenEmail, workspaces);
 
-    // Count messages per org
-    const orgCount: Record<Org, number> = { biotech: 0, tcr: 0, sentient_x: 0 };
-    for (const m of msgs) {
-      const org = channelOrg.get(m.channel_id);
-      if (org) orgCount[org]++;
-    }
-
-    // Assign to the org with the most messages
-    const topOrg = (Object.entries(orgCount) as [Org, number][])
-      .filter(([, count]) => count > 0)
-      .sort((a, b) => b[1] - a[1])[0];
-
-    if (topOrg) {
-      assignments[emp.id] = topOrg[0];
-      counters[topOrg[0]]++;
+    if (org) {
+      assignments[emp.id] = org;
+      counters[org]++;
     } else {
-      // Messages are in channels that don't belong to any workspace (DMs etc.)
       unassigned.push(emp.name);
     }
   }
@@ -129,7 +152,10 @@ export async function fetchAndAssignOrgs(): Promise<{
     db.prepare('UPDATE employees SET workspace = ? WHERE id = ?').bind(org, empId)
   );
   if (updateStmts.length > 0) {
-    await db.batch(updateStmts);
+    // Batch in chunks of 50 to avoid D1 limits
+    for (let i = 0; i < updateStmts.length; i += 50) {
+      await db.batch(updateStmts.slice(i, i + 50));
+    }
   }
 
   return { total: empList.length, assigned: counters, unassigned };
