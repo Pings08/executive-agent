@@ -94,7 +94,7 @@ export class RavenClient {
     }
 
     const params: Record<string, string> = {
-      fields: JSON.stringify(['name', 'content', 'text', 'message_type', 'owner', 'creation', 'modified', 'channel_id']),
+      fields: JSON.stringify(['name', 'content', 'text', 'message_type', 'owner', 'creation', 'modified', 'channel_id', 'file']),
       order_by: 'creation asc',
       limit_page_length: String(limit),
     };

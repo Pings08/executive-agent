@@ -37,6 +37,7 @@ export async function GET(req: NextRequest) {
       db
         .prepare(
           `SELECT rm.id, rm.content, rm.sender, rm.channel_id, rm.channel_name, rm.created_at, rm.employee_id,
+                  rm.message_type, rm.raw_json,
                   e.name as employee_name
            FROM raven_messages rm
            LEFT JOIN employees e ON rm.employee_id = e.id
@@ -47,7 +48,7 @@ export async function GET(req: NextRequest) {
         .all<{
           id: string; content: string; sender: string; channel_id: string | null;
           channel_name: string | null; created_at: string; employee_id: string | null;
-          employee_name: string | null;
+          employee_name: string | null; message_type: string | null; raw_json: string | null;
         }>(),
       fetch(`${BASE}/api/resource/Raven%20Channel?fields=${encodeURIComponent('["name","channel_name","workspace"]')}&limit_page_length=500`, {
         headers: { Authorization: AUTH },
@@ -66,7 +67,7 @@ export async function GET(req: NextRequest) {
     type GroupedMember = {
       id: string | null;
       name: string;
-      messages: { id: string; content: string; channel: string | null; time: string }[];
+      messages: { id: string; content: string; channel: string | null; time: string; message_type: string; file_url: string | null }[];
     };
     type WorkspaceGroup = {
       name: string;
@@ -100,11 +101,24 @@ export async function GET(req: NextRequest) {
       if (!group.members.has(empId)) {
         group.members.set(empId, { id: msg.employee_id || null, name: empName, messages: [] });
       }
+      // Extract file URL from raw_json for images/files
+      let fileUrl: string | null = null;
+      if (msg.message_type === 'Image' || msg.message_type === 'File') {
+        try {
+          const raw = msg.raw_json ? JSON.parse(msg.raw_json) : null;
+          if (raw?.file) {
+            fileUrl = raw.file.startsWith('http') ? raw.file : `${BASE}${raw.file}`;
+          }
+        } catch { /* ignore parse errors */ }
+      }
+
       group.members.get(empId)!.messages.push({
         id: msg.id,
         content: msg.content,
         channel: msg.channel_name || msg.channel_id,
         time: msg.created_at,
+        message_type: msg.message_type || 'Text',
+        file_url: fileUrl,
       });
     }
 

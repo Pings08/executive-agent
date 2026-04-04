@@ -15,9 +15,24 @@ const ORG_WORKSPACES: Record<string, string[]> = {
   sentient_x: ['Sentient'],
 };
 
-type Msg = { id: string; content: string; channel: string | null; time: string };
+type Msg = { id: string; content: string; channel: string | null; time: string; message_type?: string; file_url?: string | null };
 type Member = { id: string | null; name: string; messages: Msg[] };
 type WsGroup = { name: string; messageCount: number; memberCount: number; members: Member[] };
+
+function getInitials(name: string): string {
+  return name.split(' ').filter(Boolean).slice(0, 2).map(w => w[0]).join('').toUpperCase();
+}
+
+const INITIALS_COLORS = [
+  'bg-emerald-600', 'bg-blue-600', 'bg-purple-600', 'bg-amber-600',
+  'bg-rose-600', 'bg-cyan-600', 'bg-indigo-600', 'bg-teal-600',
+];
+
+function getColorForName(name: string): string {
+  let hash = 0;
+  for (const c of name) hash = ((hash << 5) - hash + c.charCodeAt(0)) | 0;
+  return INITIALS_COLORS[Math.abs(hash) % INITIALS_COLORS.length];
+}
 
 const WS_COLORS: Record<string, { bg: string; text: string; border: string }> = {
   ExRNA:         { bg: 'bg-emerald-500/10', text: 'text-emerald-400', border: 'border-emerald-500/30' },
@@ -193,8 +208,8 @@ export default function MessagesPage() {
                         onClick={() => toggleMember(memberKey)}
                         className="w-full flex items-center gap-3 px-5 py-3 hover:bg-glass/50 transition-colors"
                       >
-                        <div className="w-7 h-7 rounded-full bg-accent/15 flex items-center justify-center text-[10px] font-bold text-accent shrink-0">
-                          {member.name.charAt(0).toUpperCase()}
+                        <div className={`w-7 h-7 rounded-full ${getColorForName(member.name)} flex items-center justify-center text-[10px] font-bold text-white shrink-0`}>
+                          {getInitials(member.name)}
                         </div>
                         <span className="text-sm font-medium flex-1 text-left truncate">{member.name}</span>
                         <span className="text-[11px] text-secondary">
@@ -218,7 +233,32 @@ export default function MessagesPage() {
                                 {msg.channel && (
                                   <span className="text-[10px] text-secondary/50 mr-2">#{msg.channel}</span>
                                 )}
-                                <p className="text-xs leading-relaxed text-text-secondary inline">{msg.content}</p>
+                                {msg.message_type === 'Image' && msg.file_url ? (
+                                  <div className="mt-1">
+                                    <img
+                                      src={msg.file_url}
+                                      alt={msg.content || 'Image'}
+                                      className="max-w-xs max-h-48 rounded-lg border border-border object-contain"
+                                      loading="lazy"
+                                    />
+                                    {msg.content && msg.content !== msg.file_url && (
+                                      <p className="text-[10px] text-secondary/50 mt-1">{msg.content}</p>
+                                    )}
+                                  </div>
+                                ) : msg.message_type === 'File' && msg.file_url ? (
+                                  <div className="mt-1">
+                                    <a
+                                      href={msg.file_url}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="text-xs text-accent hover:underline inline-flex items-center gap-1"
+                                    >
+                                      {msg.content || 'Download file'}
+                                    </a>
+                                  </div>
+                                ) : (
+                                  <p className="text-xs leading-relaxed text-text-secondary inline">{msg.content}</p>
+                                )}
                               </div>
                             </div>
                           ))}
