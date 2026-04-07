@@ -1,594 +1,349 @@
 'use client';
 
-import { useApp } from '@/store/AppContext';
 import { useEffect, useState, useCallback } from 'react';
 import { WORKSPACE_LABELS, type Workspace } from '@/types';
 import {
-  Building2, Calendar, TrendingUp, Target, Users,
-  AlertTriangle, Sparkles, ChevronDown, ChevronRight,
-  Clock, Loader2, RefreshCw, ArrowRight, FlaskConical,
-  Eye, Heart, Star, Lightbulb, PlusCircle,
+  Building2, Users, MessageSquare, AlertTriangle,
+  Loader2, RefreshCw, Target, ChevronDown, Sparkles,
 } from 'lucide-react';
 import Link from 'next/link';
-import { format, parseISO } from 'date-fns';
-import { ORG_CATEGORIES, groupByCategory } from '@/lib/categories';
+import { format } from 'date-fns';
+import { ORG_CATEGORIES, classifyObjective } from '@/lib/categories';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-interface CompanySnapshot {
-  period_type: string;
-  period_start: string;
-  period_end: string;
-  narrative: string;
-  employee_narrative?: string;
-  key_themes: string[];
-  objectives_snapshot: { title: string; status_signal?: string; status?: string; objective_status?: string; level?: string; evidence?: string; confidence?: number; related_employee_names?: string[]; workspace_tag?: string }[];
-  hypotheses_detected?: { title: string; description: string; stage: string; evidence: string; related_employee_names: string[]; workspace_tag?: string }[];
-  proposed_objectives?: { title: string; reason: string; triggered_by: string; priority: string }[];
-  performance_scores?: { employee_name: string; performance_score: number; contribution_summary: string }[];
-  blockers: { description: string; severity?: string; affected_area?: string; mentioned_by?: string[]; first_excerpt?: string }[];
-  highlights: { description: string; employee_name?: string | null }[];
+interface DayData {
+  date: string;
+  totalMessages: number;
+  workspaces: { name: string; messageCount: number; memberCount: number; members: { name: string; messages: { content: string }[] }[] }[];
+}
+
+interface EmployeeEval {
+  employee_name: string;
+  topics: string[];
+  effectiveness_score: number;
+  summary: string;
+  key_contributions: string[];
+  blockers: string[];
   message_count: number;
-  active_employee_count: number;
-  created_at: string;
 }
 
 interface InferredObjective {
   id: string;
   title: string;
   description: string;
-  level: 'strategic' | 'operational' | 'tactical';
-  parent_id: string | null;
   status: string;
-  first_seen_at: string;
-  last_seen_at: string;
-  evidence_summary: string;
+  level: string;
   confidence_score: number;
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-const levelColors: Record<string, string> = {
-  strategic: 'bg-purple-500/10 text-purple-400 border-purple-500/30',
-  operational: 'bg-blue-500/10 text-blue-400 border-blue-500/30',
-  tactical: 'bg-teal-500/10 text-teal-400 border-teal-500/30',
+const statusDot: Record<string, string> = {
+  active: 'bg-green-400', progressing: 'bg-blue-400', stalled: 'bg-yellow-400',
+  completed: 'bg-emerald-400', hypothesis: 'bg-violet-400', abandoned: 'bg-gray-500',
 };
 
-const statusColors: Record<string, string> = {
-  active: 'text-green-400',
-  progressing: 'text-blue-400',
-  stalled: 'text-yellow-400',
-  completed: 'text-emerald-400',
-  abandoned: 'text-gray-500',
-  hypothesis: 'text-violet-400',
-};
+function scoreColor(s: number) {
+  if (s >= 8) return 'text-emerald-400';
+  if (s >= 6) return 'text-blue-400';
+  if (s >= 4) return 'text-amber-400';
+  return 'text-red-400';
+}
 
-const statusDots: Record<string, string> = {
-  active: 'bg-green-400',
-  progressing: 'bg-blue-400',
-  stalled: 'bg-yellow-400',
-  completed: 'bg-emerald-400',
-  abandoned: 'bg-gray-500',
-  hypothesis: 'bg-violet-400',
-};
+function getInitials(name: string) {
+  return name.split(' ').filter(Boolean).slice(0, 2).map(w => w[0]).join('').toUpperCase();
+}
+
+const AVATAR_COLORS = ['bg-emerald-600','bg-blue-600','bg-purple-600','bg-amber-600','bg-rose-600','bg-cyan-600','bg-indigo-600','bg-teal-600'];
+function avatarColor(name: string) {
+  let h = 0; for (const c of name) h = ((h << 5) - h + c.charCodeAt(0)) | 0;
+  return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
+}
 
 // ── Component ────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
-  const { employees, isLoading: appLoading } = useApp();
-
   const [selectedOrg, setSelectedOrg] = useState<Workspace>('biotech');
-  const [todaySnap, setTodaySnap] = useState<CompanySnapshot | null>(null);
-  const [weekSnap, setWeekSnap] = useState<CompanySnapshot | null>(null);
-  const [recentDays, setRecentDays] = useState<CompanySnapshot[]>([]);
+  const [today] = useState(() => new Date().toISOString().slice(0, 10));
+  const [dayData, setDayData] = useState<DayData | null>(null);
+  const [evals, setEvals] = useState<EmployeeEval[]>([]);
   const [objectives, setObjectives] = useState<InferredObjective[]>([]);
   const [loading, setLoading] = useState(true);
-  const [expandedObjective, setExpandedObjective] = useState<Set<string>>(new Set());
-  const [selectedPeriod, setSelectedPeriod] = useState<'day' | 'week'>('day');
-  const [reportView, setReportView] = useState<'pm' | 'employee'>('pm');
-  const [fetchError, setFetchError] = useState<string | null>(null);
+  const [evalLoading, setEvalLoading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [expandedCats, setExpandedCats] = useState<Set<string>>(new Set());
 
-  // Sync with sidebar org selector
+  // Sync org selector with sidebar
   useEffect(() => {
     const saved = localStorage.getItem('ea_selected_org') as Workspace | null;
     if (saved) setSelectedOrg(saved);
-
-    const handler = (e: Event) => {
-      const org = (e as CustomEvent).detail as Workspace;
-      setSelectedOrg(org);
-    };
+    const handler = (e: Event) => setSelectedOrg((e as CustomEvent).detail as Workspace);
     window.addEventListener('org-changed', handler);
     return () => window.removeEventListener('org-changed', handler);
   }, []);
 
-  const fetchCompanyData = useCallback(async (org: Workspace) => {
+  // Fetch today's data
+  const fetchAll = useCallback(async (org: Workspace) => {
     setLoading(true);
-    setFetchError(null);
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000);
-      const res = await fetch(`/api/company?org=${org}`, { signal: controller.signal });
-      clearTimeout(timeout);
-      const data = await res.json();
+      const ORG_WS: Record<string, string[]> = {
+        biotech: ['ExRNA', 'VV Biotech'], tcr: ['Technoculture'], sentient_x: ['Sentient'],
+      };
+      const allowed = ORG_WS[org] || [];
 
-      const todayStr = format(new Date(), 'yyyy-MM-dd');
-      const days = (data.daySnapshots || []) as CompanySnapshot[];
+      const [msgRes, evalRes, companyRes] = await Promise.all([
+        fetch(`/api/messages/daily?date=${today}`).then(r => r.json()).catch(() => null),
+        fetch(`/api/messages/evaluate?date=${today}&org=${org}`).then(r => r.json()).catch(() => null),
+        fetch(`/api/company?org=${org}`).then(r => r.json()).catch(() => null),
+      ]);
 
-      setRecentDays(days);
-      setTodaySnap(days.find(d => d.period_start === todayStr) || days[0] || null);
-      setWeekSnap(data.weekSnapshot as CompanySnapshot | null);
-      setObjectives(data.objectives || []);
-    } catch (err) {
-      const msg = err instanceof DOMException && err.name === 'AbortError'
-        ? 'Request timed out — Supabase may be paused or unreachable'
-        : 'Failed to connect to database';
-      setFetchError(msg);
-    }
-    setLoading(false);
+      if (msgRes) {
+        const filtered = (msgRes.workspaces || []).filter((w: DayData['workspaces'][0]) => allowed.includes(w.name));
+        setDayData({
+          date: today,
+          totalMessages: filtered.reduce((s: number, w: DayData['workspaces'][0]) => s + w.messageCount, 0),
+          workspaces: filtered,
+        });
+      }
+      setEvals(evalRes?.evaluations || []);
+      setObjectives(companyRes?.objectives || []);
+    } catch { /* silent */ }
+    finally { setLoading(false); }
+  }, [today]);
+
+  useEffect(() => { fetchAll(selectedOrg); }, [fetchAll, selectedOrg]);
+
+  // Auto-sync: ingest new messages on load
+  useEffect(() => {
+    const sync = async () => {
+      setSyncing(true);
+      try {
+        await fetch('/api/pipeline/ingest', { method: 'POST', signal: AbortSignal.timeout(10000) });
+      } catch { /* silent */ }
+      finally { setSyncing(false); }
+    };
+    const t = setTimeout(sync, 3000);
+    return () => clearTimeout(t);
   }, []);
 
-  useEffect(() => {
-    fetchCompanyData(selectedOrg);
-  }, [fetchCompanyData, selectedOrg]);
-
-  // Build objective tree
-  const rootObjectives = objectives.filter(o => !o.parent_id);
-  const childMap = new Map<string, InferredObjective[]>();
-  for (const obj of objectives) {
-    if (obj.parent_id) {
-      const children = childMap.get(obj.parent_id) || [];
-      children.push(obj);
-      childMap.set(obj.parent_id, children);
-    }
-  }
-
-  const toggleExpand = (id: string) => {
-    setExpandedObjective(prev => {
-      const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
-      return next;
-    });
+  // Run AI evaluation
+  const runEval = async () => {
+    setEvalLoading(true);
+    try {
+      const res = await fetch(`/api/messages/evaluate?date=${today}&org=${selectedOrg}`, { method: 'POST' });
+      const data = await res.json();
+      setEvals(data.evaluations || []);
+    } catch { /* silent */ }
+    finally { setEvalLoading(false); }
   };
 
-  const currentSnap = selectedPeriod === 'day' ? todaySnap : weekSnap;
-  const isLoading = appLoading || loading;
+  // Category grouping
+  const categories = ORG_CATEGORIES[selectedOrg] || [];
+  const catGroups = new Map<string, { label: string; color: string; bgColor: string; borderColor: string; objs: InferredObjective[] }>();
+  for (const cat of categories) catGroups.set(cat.id, { label: cat.label, color: cat.color, bgColor: cat.bgColor, borderColor: cat.borderColor, objs: [] });
+  catGroups.set('other', { label: 'Other', color: 'text-gray-400', bgColor: 'bg-gray-500/10', borderColor: 'border-gray-500/30', objs: [] });
+  for (const obj of objectives) {
+    const catId = classifyObjective(obj.title, obj.description || '', categories);
+    catGroups.get(catId)?.objs.push(obj);
+  }
 
-  const noData = !isLoading && !todaySnap && !weekSnap && objectives.length === 0;
+  const toggleCat = (id: string) => setExpandedCats(p => { const x = new Set(p); x.has(id) ? x.delete(id) : x.add(id); return x; });
+
+  // Compute stats
+  const totalPeople = new Set(dayData?.workspaces.flatMap(w => w.members.map(m => m.name)) || []).size;
+  const totalMsgs = dayData?.totalMessages || 0;
+  const avgScore = evals.length > 0 ? (evals.reduce((s, e) => s + e.effectiveness_score, 0) / evals.length).toFixed(1) : '—';
+  const blockers = evals.flatMap(e => e.blockers.map(b => ({ employee: e.employee_name, blocker: b })));
 
   return (
-    <div className="max-w-7xl mx-auto py-8 px-6 space-y-8 animate-fadeIn">
+    <div className="max-w-5xl mx-auto py-8 px-6 space-y-6 animate-fadeIn">
       {/* Header */}
       <header className="flex justify-between items-end">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight flex items-center gap-3">
-            <Building2 className="text-accent" size={28} />
-            {WORKSPACE_LABELS[selectedOrg]} Pulse
+          <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
+            <Building2 className="text-accent" size={24} />
+            {WORKSPACE_LABELS[selectedOrg]}
           </h1>
-          <p className="text-secondary text-sm mt-1">{format(new Date(), 'EEEE, MMMM d, yyyy')}</p>
+          <p className="text-secondary text-sm mt-0.5">{format(new Date(), 'EEEE, MMMM d, yyyy')}</p>
         </div>
         <div className="flex items-center gap-3">
-          {isLoading && <Loader2 className="animate-spin text-accent" size={14} />}
-          <button
-            onClick={() => fetchCompanyData(selectedOrg)}
-            className="text-xs font-bold text-secondary hover:text-accent flex items-center gap-1 transition-colors"
-          >
+          {(syncing || loading) && <Loader2 className="animate-spin text-accent" size={14} />}
+          <button onClick={() => fetchAll(selectedOrg)} className="text-xs font-bold text-secondary hover:text-accent flex items-center gap-1">
             <RefreshCw size={12} /> Refresh
           </button>
         </div>
       </header>
 
-      {/* Connection Error Banner */}
-      {fetchError && (
-        <div className="card !border-red-500/30 bg-red-500/5 flex items-center gap-3 !py-3">
-          <AlertTriangle className="text-red-400 shrink-0" size={18} />
-          <div className="flex-1">
-            <p className="text-sm font-bold text-red-400">{fetchError}</p>
-            <p className="text-xs text-secondary mt-0.5">
-              Check your Cloudflare D1 database status. Go to{' '}
-              <a href="https://dash.cloudflare.com" target="_blank" rel="noopener noreferrer" className="text-accent underline">Cloudflare Dashboard</a>
-              {' '}and verify your D1 database is accessible.
-            </p>
+      {/* Today's Stats — 4 cards */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {[
+          { label: 'Messages', value: totalMsgs, icon: MessageSquare },
+          { label: 'Active People', value: totalPeople, icon: Users },
+          { label: 'Avg Score', value: avgScore, icon: Sparkles },
+          { label: 'Blockers', value: blockers.length, icon: AlertTriangle },
+        ].map((s, i) => (
+          <div key={i} className="card !py-3 !px-4">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-[10px] font-bold text-secondary uppercase tracking-wider">{s.label}</span>
+              <s.icon size={14} className="text-accent/50" />
+            </div>
+            <span className="text-2xl font-bold">{s.value}</span>
           </div>
-          <button onClick={() => fetchCompanyData(selectedOrg)} className="text-xs font-bold text-accent hover:underline shrink-0">
-            Retry
+        ))}
+      </div>
+
+      {/* Team Activity — who did what today */}
+      <section className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-bold flex items-center gap-2">
+            <Users className="text-accent" size={16} />
+            Today&apos;s Team Activity
+          </h2>
+          <button onClick={runEval} disabled={evalLoading || totalMsgs === 0}
+            className="text-[11px] font-bold text-accent hover:underline flex items-center gap-1 disabled:opacity-40">
+            {evalLoading ? <Loader2 size={11} className="animate-spin" /> : <Sparkles size={11} />}
+            {evals.length > 0 ? 'Re-evaluate' : 'AI Evaluate'}
           </button>
         </div>
-      )}
 
-      {noData && !fetchError && (
-        <div className="card text-center py-16 space-y-4">
-          <Sparkles className="mx-auto text-accent/50" size={40} />
-          <h2 className="text-lg font-bold">No Company Snapshots Yet</h2>
-          <p className="text-secondary text-sm max-w-md mx-auto">
-            The company synthesis pipeline distills all team communications into daily narratives, weekly rollups, and a hierarchy of inferred objectives.
-          </p>
-          <div className="text-xs text-secondary space-y-1">
-            <p>1. Go to Settings and click <strong>&quot;Backfill Days&quot;</strong> to synthesize historical days</p>
-            <p>2. Then click <strong>&quot;Extract Objectives&quot;</strong> to build the objective hierarchy</p>
-            <p>3. Use <strong>&quot;Synthesize Today&quot;</strong> for the latest snapshot</p>
+        {totalMsgs === 0 && !loading && (
+          <div className="card text-center py-10">
+            <MessageSquare size={24} className="mx-auto text-secondary/30 mb-2" />
+            <p className="text-sm text-secondary">No messages today yet</p>
+            <p className="text-xs text-secondary/50 mt-1">Messages auto-sync from Raven every 10 minutes</p>
           </div>
-          <Link href="/settings" className="inline-block mt-4 text-sm font-bold text-accent hover:underline">
-            Go to Settings <ArrowRight className="inline" size={14} />
-          </Link>
-        </div>
-      )}
+        )}
 
-      {!noData && (
-        <>
-          {/* Stats Row */}
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-            {[
-              {
-                label: 'Messages Today',
-                value: todaySnap?.message_count ?? '—',
-                icon: Calendar,
-                color: 'text-accent',
-              },
-              {
-                label: 'Active Employees',
-                value: todaySnap?.active_employee_count ?? employees.length,
-                icon: Users,
-                color: 'text-accent',
-              },
-              {
-                label: 'Inferred Objectives',
-                value: objectives.filter(o => o.status === 'active' || o.status === 'progressing').length,
-                icon: Target,
-                color: 'text-accent',
-              },
-              {
-                label: 'Key Themes',
-                value: todaySnap?.key_themes?.length ?? 0,
-                icon: TrendingUp,
-                color: 'text-accent',
-              },
-            ].map((stat, i) => (
-              <div key={i} className="card">
-                <div className="flex justify-between items-start mb-4">
-                  <span className="text-xs font-bold text-secondary uppercase tracking-wider">{stat.label}</span>
-                  <stat.icon className={`${stat.color} opacity-60`} size={18} />
-                </div>
-                <p className="text-3xl font-bold">{stat.value}</p>
-              </div>
-            ))}
+        {evalLoading && (
+          <div className="card flex items-center justify-center gap-2 py-6 text-sm text-secondary">
+            <Loader2 size={16} className="animate-spin" /> Evaluating with AI...
           </div>
+        )}
 
-          {/* Period + View Selectors + Narrative */}
-          <section className="space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                {(['day', 'week'] as const).map(p => (
-                  <button
-                    key={p}
-                    onClick={() => setSelectedPeriod(p)}
-                    className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-colors ${
-                      selectedPeriod === p
-                        ? 'bg-accent/20 text-accent'
-                        : 'bg-glass text-secondary hover:text-primary'
-                    }`}
-                  >
-                    {p === 'day' ? 'Daily View' : 'Weekly Rollup'}
-                  </button>
-                ))}
-              </div>
+        {/* Employee cards */}
+        {!evalLoading && dayData && dayData.workspaces.flatMap(w => w.members).length > 0 && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            {(() => {
+              // Merge members across workspaces, attach eval
+              const memberMap = new Map<string, { name: string; msgCount: number; eval?: EmployeeEval }>();
+              for (const ws of dayData.workspaces) {
+                for (const m of ws.members) {
+                  const existing = memberMap.get(m.name);
+                  if (existing) { existing.msgCount += m.messages.length; }
+                  else { memberMap.set(m.name, { name: m.name, msgCount: m.messages.length }); }
+                }
+              }
+              // Attach evals
+              for (const ev of evals) {
+                const m = memberMap.get(ev.employee_name);
+                if (m) m.eval = ev;
+              }
 
-              {/* PM / Employee View Toggle */}
-              <div className="flex items-center gap-1 bg-glass rounded-lg p-0.5">
-                <button
-                  onClick={() => setReportView('pm')}
-                  className={`px-3 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 transition-colors ${
-                    reportView === 'pm'
-                      ? 'bg-accent/20 text-accent'
-                      : 'text-secondary hover:text-primary'
-                  }`}
-                >
-                  <Eye size={10} /> PM View
-                </button>
-                <button
-                  onClick={() => setReportView('employee')}
-                  className={`px-3 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 transition-colors ${
-                    reportView === 'employee'
-                      ? 'bg-emerald-500/20 text-emerald-400'
-                      : 'text-secondary hover:text-primary'
-                  }`}
-                >
-                  <Heart size={10} /> Team View
-                </button>
-              </div>
-            </div>
-
-            {currentSnap ? (
-              <div className="card space-y-4">
-                <div className="flex items-center justify-between">
-                  <h2 className="text-lg font-bold flex items-center gap-2">
-                    <Sparkles className="text-accent" size={18} />
-                    {selectedPeriod === 'day'
-                      ? `${format(parseISO(currentSnap.period_start), 'EEEE, MMM d')} — ${reportView === 'pm' ? 'PM Intelligence' : 'Team Summary'}`
-                      : `Week of ${format(parseISO(currentSnap.period_start), 'MMM d')} – ${format(parseISO(currentSnap.period_end), 'MMM d')}`}
-                  </h2>
-                  <span className="text-[10px] text-secondary">
-                    {currentSnap.message_count} msgs · {currentSnap.active_employee_count} people
-                  </span>
-                </div>
-
-                {/* Narrative — switches based on PM/Employee view */}
-                <p className="text-sm leading-relaxed text-primary/90">
-                  {reportView === 'employee' && currentSnap.employee_narrative
-                    ? currentSnap.employee_narrative
-                    : currentSnap.narrative}
-                </p>
-
-                {/* Key Themes */}
-                {currentSnap.key_themes?.length > 0 && (
-                  <div className="flex flex-wrap gap-2">
-                    {currentSnap.key_themes.map((theme, i) => (
-                      <span key={i} className="text-[10px] font-bold bg-accent/10 text-accent px-2 py-0.5 rounded">
-                        {theme}
-                      </span>
-                    ))}
-                  </div>
-                )}
-
-                {/* Performance Scores — employee view */}
-                {reportView === 'employee' && currentSnap.performance_scores && currentSnap.performance_scores.length > 0 && (
-                  <div className="space-y-2 mt-2">
-                    <h3 className="text-xs font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-1">
-                      <Star size={12} /> Contributions
-                    </h3>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                      {currentSnap.performance_scores.map((ps, i) => (
-                        <div key={i} className="text-xs p-2 bg-emerald-500/5 border border-emerald-500/20 rounded-lg flex items-start gap-2">
-                          <span className="text-lg font-bold text-emerald-400 shrink-0">{ps.performance_score}</span>
-                          <div>
-                            <span className="font-bold">{ps.employee_name}</span>
-                            <p className="text-secondary/70 mt-0.5">{ps.contribution_summary}</p>
-                          </div>
-                        </div>
-                      ))}
+              return [...memberMap.values()]
+                .sort((a, b) => (b.eval?.effectiveness_score || 0) - (a.eval?.effectiveness_score || 0) || b.msgCount - a.msgCount)
+                .map(member => (
+                  <div key={member.name} className="card !p-3 flex items-start gap-3">
+                    <div className={`w-8 h-8 rounded-full ${avatarColor(member.name)} flex items-center justify-center text-[10px] font-bold text-white shrink-0 mt-0.5`}>
+                      {getInitials(member.name)}
                     </div>
-                  </div>
-                )}
-
-                {/* Objectives detected in this snapshot */}
-                {currentSnap.objectives_snapshot?.length > 0 && (
-                  <div className="space-y-2 mt-2">
-                    <h3 className="text-xs font-bold text-accent uppercase tracking-wider flex items-center gap-1">
-                      <Target size={12} /> Objectives Detected
-                    </h3>
-                    {currentSnap.objectives_snapshot.map((obj, i) => (
-                      <div key={i} className="text-xs p-2 bg-accent/5 border border-accent/20 rounded-lg">
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="font-bold">{obj.title}</span>
-                          {obj.level && (
-                            <span className={`text-[9px] px-1 py-px rounded border ${levelColors[obj.level] || 'bg-gray-500/10 text-gray-400 border-gray-500/30'}`}>
-                              {obj.level}
-                            </span>
-                          )}
-                          {obj.objective_status && (
-                            <span className={`text-[9px] px-1 py-px rounded border ${
-                              obj.objective_status === 'Hypothesis'
-                                ? 'bg-violet-500/10 text-violet-400 border-violet-500/30'
-                                : obj.objective_status === 'Completed'
-                                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
-                                  : 'bg-green-500/10 text-green-400 border-green-500/30'
-                            }`}>
-                              {obj.objective_status}
-                            </span>
-                          )}
-                          {(obj.status_signal || obj.status) && (
-                            <span className={`text-[9px] ${statusColors[obj.status_signal || obj.status || 'active']}`}>
-                              {obj.status_signal || obj.status}
-                            </span>
-                          )}
-                          {obj.workspace_tag && (
-                            <span className="text-[9px] text-secondary/50 italic">{obj.workspace_tag}</span>
-                          )}
-                        </div>
-                        {obj.evidence && <p className="text-secondary/70">{obj.evidence}</p>}
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {/* Hypotheses Detected */}
-                {currentSnap.hypotheses_detected && currentSnap.hypotheses_detected.length > 0 && (
-                  <div className="space-y-2 mt-2">
-                    <h3 className="text-xs font-bold text-violet-400 uppercase tracking-wider flex items-center gap-1">
-                      <FlaskConical size={12} /> Hypotheses (Research/Ideation)
-                    </h3>
-                    {currentSnap.hypotheses_detected.map((h, i) => (
-                      <div key={i} className="text-xs p-2 bg-violet-500/5 border border-violet-500/20 rounded-lg">
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="font-bold">{h.title}</span>
-                          <span className="text-[9px] px-1 py-px rounded border bg-violet-500/10 text-violet-400 border-violet-500/30">
-                            {h.stage}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium truncate">{member.name}</span>
+                        {member.eval && (
+                          <span className={`text-sm font-bold ${scoreColor(member.eval.effectiveness_score)}`}>
+                            {member.eval.effectiveness_score}/10
                           </span>
-                          {h.workspace_tag && (
-                            <span className="text-[9px] text-secondary/50 italic">{h.workspace_tag}</span>
-                          )}
-                        </div>
-                        <p className="text-secondary/70">{h.description}</p>
-                        {h.evidence && <p className="text-secondary/50 mt-1 italic">{h.evidence}</p>}
+                        )}
+                        <span className="text-[10px] text-secondary ml-auto shrink-0">{member.msgCount} msgs</span>
                       </div>
-                    ))}
-                  </div>
-                )}
-
-                {/* Proposed Objectives — PM view only */}
-                {reportView === 'pm' && currentSnap.proposed_objectives && currentSnap.proposed_objectives.length > 0 && (
-                  <div className="space-y-2 mt-2">
-                    <h3 className="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1">
-                      <Lightbulb size={12} /> Proposed Objectives
-                    </h3>
-                    {currentSnap.proposed_objectives.map((po, i) => (
-                      <div key={i} className="text-xs p-2 bg-amber-500/5 border border-amber-500/20 rounded-lg">
-                        <div className="flex items-center gap-2 mb-1">
-                          <PlusCircle size={10} className="text-amber-400 shrink-0" />
-                          <span className="font-bold">{po.title}</span>
-                          <span className={`text-[9px] px-1 py-px rounded border ${
-                            po.priority === 'high' ? 'bg-red-500/10 text-red-400 border-red-500/30'
-                              : po.priority === 'medium' ? 'bg-amber-500/10 text-amber-400 border-amber-500/30'
-                                : 'bg-gray-500/10 text-gray-400 border-gray-500/30'
-                          }`}>{po.priority}</span>
-                        </div>
-                        <p className="text-secondary/70">{po.reason}</p>
-                        <span className="text-[10px] text-secondary/50 mt-1 block">Triggered by: {po.triggered_by}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {/* Blockers & Highlights side by side */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-2">
-                  {currentSnap.blockers?.length > 0 && (
-                    <div className="space-y-2">
-                      <h3 className="text-xs font-bold text-red-400 uppercase tracking-wider flex items-center gap-1">
-                        <AlertTriangle size={12} /> Blockers Identified
-                      </h3>
-                      {currentSnap.blockers.map((b, i) => (
-                        <div key={i} className="text-xs p-2 bg-red-500/5 border border-red-500/20 rounded-lg">
-                          <p>{typeof b === 'string' ? b : b.description}</p>
-                          {typeof b !== 'string' && b.affected_area && (
-                            <span className="text-[10px] text-red-300/60 mt-1 block">Area: {b.affected_area}</span>
+                      {member.eval ? (
+                        <>
+                          <p className="text-[11px] text-secondary/70 mt-0.5 line-clamp-2">{member.eval.summary}</p>
+                          {member.eval.topics.length > 0 && (
+                            <div className="flex flex-wrap gap-1 mt-1">
+                              {member.eval.topics.slice(0, 3).map((t, j) => (
+                                <span key={j} className="text-[9px] bg-accent/10 text-accent px-1.5 py-0.5 rounded">{t}</span>
+                              ))}
+                            </div>
                           )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {currentSnap.highlights?.length > 0 && (
-                    <div className="space-y-2">
-                      <h3 className="text-xs font-bold text-green-400 uppercase tracking-wider flex items-center gap-1">
-                        <Sparkles size={12} /> Highlights
-                      </h3>
-                      {currentSnap.highlights.map((h, i) => (
-                        <div key={i} className="text-xs p-2 bg-green-500/5 border border-green-500/20 rounded-lg">
-                          <p>{typeof h === 'string' ? h : h.description}</p>
-                          {typeof h !== 'string' && h.employee_name && (
-                            <span className="text-[10px] text-green-300/60 mt-1 block">By: {h.employee_name}</span>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            ) : (
-              <div className="card text-center py-8 text-secondary text-xs italic">
-                No {selectedPeriod} snapshot available yet. Run synthesis from Settings.
-              </div>
-            )}
-          </section>
-
-          {/* Objectives by Category */}
-          <section className="space-y-4">
-            <div className="flex justify-between items-center">
-              <h2 className="text-lg font-bold flex items-center gap-2">
-                <Target className="text-accent" size={18} />
-                Objectives by Category
-              </h2>
-              <span className="text-[10px] text-secondary">
-                {objectives.length} total · {objectives.filter(o => o.status === 'active' || o.status === 'progressing').length} active
-              </span>
-            </div>
-
-            {objectives.length === 0 ? (
-              <div className="card text-center py-8 text-secondary text-xs italic">
-                No objectives extracted yet. Run synthesis from Settings.
-              </div>
-            ) : (() => {
-              const categories = ORG_CATEGORIES[selectedOrg] || [];
-              const grouped = groupByCategory(objectives, categories);
-
-              return (
-                <div className="space-y-3">
-                  {[...grouped.entries()]
-                    .filter(([, g]) => g.objectives.length > 0)
-                    .map(([catId, { category: cat, objectives: catObjs }]) => (
-                    <div key={catId} className={`rounded-xl border ${cat.borderColor} overflow-hidden`}>
-                      {/* Category header */}
-                      <button
-                        onClick={() => toggleExpand(catId)}
-                        className={`w-full flex items-center justify-between px-5 py-3 ${cat.bgColor} hover:brightness-110 transition-all`}
-                      >
-                        <div className="flex items-center gap-3">
-                          <ChevronDown
-                            size={16}
-                            className={`${cat.color} transition-transform ${expandedObjective.has(catId) ? '' : '-rotate-90'}`}
-                          />
-                          <span className={`text-sm font-bold ${cat.color}`}>{cat.label}</span>
-                        </div>
-                        <div className="flex items-center gap-3">
-                          {/* Mini status bar */}
-                          <div className="flex gap-0.5">
-                            {catObjs.map((o, i) => (
-                              <div
-                                key={i}
-                                className={`w-2.5 h-2.5 rounded-sm ${statusDots[(o as InferredObjective).status] || 'bg-gray-400'}`}
-                                title={`${o.title} (${o.status})`}
-                              />
-                            ))}
-                          </div>
-                          <span className="text-[11px] text-secondary">{catObjs.length}</span>
-                        </div>
-                      </button>
-
-                      {/* Objectives in this category */}
-                      {expandedObjective.has(catId) && (
-                        <div className="divide-y divide-border/30">
-                          {catObjs.map((obj, i) => {
-                            const o = obj;
-                            return (
-                              <div key={i} className="px-5 py-3">
-                                <div className="flex items-center gap-2 mb-1">
-                                  <span className={`w-2 h-2 rounded-full shrink-0 ${statusDots[o.status] || 'bg-gray-400'}`} />
-                                  <span className="text-sm font-medium">{o.title}</span>
-                                  <span className={`text-[9px] px-1 py-px rounded border ${levelColors[o.level] || ''}`}>{o.level}</span>
-                                  <span className={`text-[9px] font-bold ${statusColors[o.status] || 'text-gray-400'}`}>{o.status}</span>
-                                </div>
-                                {o.description && (
-                                  <p className="text-[10px] text-secondary/70 ml-4 line-clamp-2">{o.description}</p>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
+                        </>
+                      ) : (
+                        <p className="text-[10px] text-secondary/40 mt-0.5">Click &quot;AI Evaluate&quot; for assessment</p>
                       )}
                     </div>
-                  ))}
-                </div>
-              );
-            })()}
-          </section>
-
-          {/* Recent Activity Timeline */}
-          {recentDays.length > 0 && (
-            <section className="space-y-4">
-              <h2 className="text-lg font-bold flex items-center gap-2">
-                <Clock className="text-accent" size={18} />
-                Recent Activity
-              </h2>
-              <div className="space-y-3">
-                {recentDays.map((day, idx) => (
-                  <div key={idx} className="card !p-4">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-xs font-bold">
-                        {format(parseISO(day.period_start), 'EEE, MMM d')}
-                      </span>
-                      <div className="flex items-center gap-2 text-[10px] text-secondary">
-                        <span>{day.message_count} msgs</span>
-                        <span>·</span>
-                        <span>{day.active_employee_count} people</span>
-                      </div>
-                    </div>
-                    <p className="text-xs text-secondary/80 line-clamp-3 leading-relaxed">{day.narrative}</p>
                   </div>
-                ))}
-              </div>
-            </section>
-          )}
-        </>
+                ));
+            })()}
+          </div>
+        )}
+      </section>
+
+      {/* Blockers */}
+      {blockers.length > 0 && (
+        <section className="space-y-2">
+          <h2 className="text-sm font-bold flex items-center gap-2 text-red-400">
+            <AlertTriangle size={16} /> Blockers
+          </h2>
+          {blockers.map((b, i) => (
+            <div key={i} className="text-xs p-2.5 bg-red-500/5 border border-red-500/20 rounded-lg">
+              <span className="font-bold">{b.employee}:</span> {b.blocker}
+            </div>
+          ))}
+        </section>
       )}
+
+      {/* Category Health */}
+      {objectives.length > 0 && (
+        <section className="space-y-3">
+          <h2 className="text-sm font-bold flex items-center gap-2">
+            <Target className="text-accent" size={16} />
+            Category Status
+          </h2>
+          <div className="space-y-2">
+            {[...catGroups.entries()]
+              .filter(([, g]) => g.objs.length > 0)
+              .map(([catId, g]) => {
+                const active = g.objs.filter(o => o.status === 'active' || o.status === 'progressing').length;
+                const completed = g.objs.filter(o => o.status === 'completed').length;
+                const stalled = g.objs.filter(o => o.status === 'stalled').length;
+                const isOpen = expandedCats.has(catId);
+
+                return (
+                  <div key={catId} className={`rounded-lg border ${g.borderColor} overflow-hidden`}>
+                    <button onClick={() => toggleCat(catId)} className={`w-full flex items-center justify-between px-4 py-2.5 ${g.bgColor} hover:brightness-110`}>
+                      <div className="flex items-center gap-2">
+                        <ChevronDown size={14} className={`${g.color} transition-transform ${isOpen ? '' : '-rotate-90'}`} />
+                        <span className={`text-xs font-bold ${g.color}`}>{g.label}</span>
+                      </div>
+                      <div className="flex items-center gap-2 text-[10px] text-secondary">
+                        {active > 0 && <span>{active} active</span>}
+                        {completed > 0 && <span className="text-emerald-400">{completed} done</span>}
+                        {stalled > 0 && <span className="text-yellow-400">{stalled} stalled</span>}
+                      </div>
+                    </button>
+                    {isOpen && (
+                      <div className="px-4 py-2 space-y-1.5">
+                        {g.objs.map(o => (
+                          <div key={o.id} className="flex items-center gap-2 text-xs">
+                            <span className={`w-2 h-2 rounded-full shrink-0 ${statusDot[o.status] || 'bg-gray-400'}`} />
+                            <span className="truncate">{o.title}</span>
+                            <span className="text-[9px] text-secondary/50 shrink-0">{o.status}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+          </div>
+        </section>
+      )}
+
+      {/* Quick links */}
+      <div className="flex items-center gap-4 text-xs text-secondary pt-2">
+        <Link href="/messages" className="hover:text-accent">View all messages</Link>
+        <Link href="/categories" className="hover:text-accent">Category details</Link>
+        <Link href="/settings" className="hover:text-accent">Settings</Link>
+      </div>
     </div>
   );
 }
